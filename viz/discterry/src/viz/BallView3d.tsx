@@ -9,12 +9,17 @@ import {
 import {
   WebGPURenderer,
   Scene,
+  Group,
+  Object3D,
+  Mesh,
   PerspectiveCamera,
   LineSegments,
   BufferGeometry,
   Float32BufferAttribute,
   LineBasicMaterial,
+  Line2NodeMaterial,
   Color,
+  AdditiveBlending,
   InstancedMesh,
   MeshBasicMaterial,
   SphereGeometry,
@@ -25,19 +30,32 @@ import {
   Raycaster,
   EdgesGeometry,
 } from "three/webgpu";
+import { LineSegments2 } from "three/addons/lines/webgpu/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import type { NodeDiskHoverTooltip } from "../nodeListTooltip";
+import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
 import type { SceneBuffers3d } from "../model/computeScene3d";
+import { VIEWER_RIM_GAMMA_MAX, VIEWER_RIM_GAMMA_MIN, VIEWER_RIM_WHEEL_SENS } from "../math/constants";
 
 /**
  * Unit-sphere geometry is radius 1; instance matrix scale sets world radius.
  * Chosen so default `nodeSizeMul`≈0.5 matches disk-like footprint in the |w|≤1 ball.
  */
 const OTHER_BALL_BASE = 0.0055;
+/** Non-seed (green) spheres: visual scale relative to `OTHER_BALL_BASE` (seeds unchanged). */
+const OTHER_BALL_VISUAL_SCALE = 0.5;
 const SEED_BALL_BASE = 0.011;
 const BALL_WIRE_SEGMENTS = 48;
 /** Orbit distance at default framing — used like disk `zoom` for node size compensation. */
 const CAM_REF_DIST = 2.85;
 const ZOOM_NODE_COMP_STRENGTH = 0.5;
+const PATH_OVERLAY_OPACITY_BASE = 0.55;
+/** Prim MST / path overlay stroke width in 3D (DiskView uses 4; this is 3×). */
+const PATH_OVERLAY_LINEWIDTH_3D = 12;
+/** Seed–seed (“red”) edges in 3D: 3× DiskView `lineBoth` linewidth (4). */
+const BOTH_SEED_LINEWIDTH_3D = 12;
+/** Shift+drag: rotate graph content (trackball-style, camera-relative axes). */
+const SHIFT_BALL_DRAG_ROT = 0.0055;
 
 export type BallDisplaySizing = {
   centerWeighted: boolean;
@@ -46,12 +64,15 @@ export type BallDisplaySizing = {
   nodeSizeMul: number;
   compensateZoomNodes: boolean;
   nodeMinMul: number;
+  /** Opacity of additive blue one-seed edges (`lineOne`). */
+  edgeOpacity: number;
 };
 
 export type BallView3dHandle = {
   resetView: () => void;
   applySceneBuffers: (buf: SceneBuffers3d | null) => void;
   fitSubgraphToView: () => void;
+  setPathOverlayOpacityMultiplier: (mult: number) => void;
 };
 
 export type BallView3dNodeInteraction = {
@@ -81,27 +102,40 @@ type BallCtx = {
   camera: InstanceType<typeof PerspectiveCamera>;
   host: HTMLDivElement;
   lineBg: InstanceType<typeof LineSegments> | null;
-  lineBoth: InstanceType<typeof LineSegments> | null;
+  lineBoth: InstanceType<typeof Mesh> | null;
   lineOne: InstanceType<typeof LineSegments> | null;
   meshOther: InstanceType<typeof InstancedMesh> | null;
   meshSeeds: InstanceType<typeof InstancedMesh> | null;
+  linePath: InstanceType<typeof Mesh> | null;
   ballWire: InstanceType<typeof LineSegments> | null;
+  /** Graph + overlay (not the unit wire); Shift+drag rotates this group. */
+  contentRoot: InstanceType<typeof Group>;
+  rimGammaRef: RefObject<number>;
   nodeTipEl: HTMLDivElement;
   raycaster: InstanceType<typeof Raycaster>;
   ndcPointer: InstanceType<typeof Vector2>;
+  labelsLayer: HTMLDivElement;
+  labelSpans: HTMLSpanElement[];
   raf: number;
 };
 
-function disposeLine(m: InstanceType<typeof LineSegments> | null, scene3: InstanceType<typeof Scene>) {
-  if (!m) return;
-  scene3.remove(m);
+function disposeLine(m: InstanceType<typeof LineSegments> | null, parent: InstanceType<typeof Object3D> | null) {
+  if (!m || !parent) return;
+  parent.remove(m);
   m.geometry.dispose();
   (m.material as InstanceType<typeof LineBasicMaterial>).dispose();
 }
 
-function disposeInst(m: InstanceType<typeof InstancedMesh> | null, scene3: InstanceType<typeof Scene>) {
-  if (!m) return;
-  scene3.remove(m);
+function disposeWideLineSegments2(m: InstanceType<typeof Mesh> | null, parent: InstanceType<typeof Object3D> | null) {
+  if (!m || !parent) return;
+  parent.remove(m);
+  m.geometry.dispose();
+  (m.material as InstanceType<typeof Line2NodeMaterial>).dispose();
+}
+
+function disposeInst(m: InstanceType<typeof InstancedMesh> | null, parent: InstanceType<typeof Object3D> | null) {
+  if (!m || !parent) return;
+  parent.remove(m);
   m.geometry.dispose();
   (m.material as InstanceType<typeof MeshBasicMaterial>).dispose();
 }
@@ -110,6 +144,66 @@ const _m4 = new Matrix4();
 const _v3 = new Vector3();
 const _vScale = new Vector3();
 const _qId = new Quaternion();
+const _seedLblView = new Vector3();
+const _seedLblNdc = new Vector3();
+const _seedLblWorld = new Vector3();
+const _dragAxisRight = new Vector3();
+const _dragAxisUp = new Vector3();
+const _qDragH = new Quaternion();
+const _qDragV = new Quaternion();
+const _qDragDelta = new Quaternion();
+
+/** Display map w ↦ |w|^(γ−1) w (unit sphere fixed); same idea as disk ``rimPreservingGamma``. */
+function rimBallMapInPlace(v: InstanceType<typeof Vector3>, gamma: number): void {
+  if (Math.abs(gamma - 1) < 1e-9) return;
+  const r = v.length();
+  if (r < 1e-15) {
+    v.set(0, 0, 0);
+    return;
+  }
+  const s = r ** (gamma - 1);
+  v.multiplyScalar(s);
+}
+
+function setRimDisplayWorld(
+  rawx: number,
+  rawy: number,
+  rawz: number,
+  ctx: BallCtx,
+  out: InstanceType<typeof Vector3>,
+): void {
+  out.set(rawx, rawy, rawz);
+  rimBallMapInPlace(out, ctx.rimGammaRef.current ?? 1);
+  out.applyQuaternion(ctx.contentRoot.quaternion);
+}
+
+function fillRimGammaPositions(
+  src: Float32Array,
+  nFloats: number,
+  gamma: number,
+  dst: Float32Array,
+): void {
+  if (Math.abs(gamma - 1) < 1e-9) {
+    dst.set(src.subarray(0, nFloats));
+    return;
+  }
+  for (let i = 0; i < nFloats; i += 3) {
+    const x = src[i]!;
+    const y = src[i + 1]!;
+    const z = src[i + 2]!;
+    const r = Math.hypot(x, y, z);
+    if (r < 1e-15) {
+      dst[i] = 0;
+      dst[i + 1] = 0;
+      dst[i + 2] = 0;
+    } else {
+      const s = r ** (gamma - 1);
+      dst[i] = x * s;
+      dst[i + 1] = y * s;
+      dst[i + 2] = z * s;
+    }
+  }
+}
 
 function radialScaleFromR(r: number, sMin: number, sMax: number): number {
   const t = Math.min(1, Math.max(0, r));
@@ -136,26 +230,80 @@ function clampedRadialScale(
   return Math.min(hi, Math.max(lo, Math.max(s0, nodeMinMul)));
 }
 
+function syncBallSeedLabels(ctx: BallCtx, buf: SceneBuffers3d | null, show: boolean) {
+  const layer = ctx.labelsLayer;
+  layer.innerHTML = "";
+  ctx.labelSpans = [];
+  if (!show || !buf || buf.nPointsSeed === 0) return;
+  for (let i = 0; i < buf.nPointsSeed; i++) {
+    const sp = document.createElement("span");
+    sp.className = "seedLabel";
+    sp.textContent = buf.seedLabels[i] ?? "";
+    layer.appendChild(sp);
+    ctx.labelSpans.push(sp);
+  }
+}
+
+function updateBallSeedLabelPositions(ctx: BallCtx, buf: SceneBuffers3d | null, show: boolean) {
+  const spans = ctx.labelSpans;
+  if (!show || !buf || buf.nPointsSeed === 0 || spans.length !== buf.nPointsSeed) return;
+  const { camera, renderer } = ctx;
+  const canvas = renderer.domElement;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w <= 0 || h <= 0) return;
+  const p = buf.pointsSeed;
+  const ox = 8;
+  const oy = -7;
+  for (let i = 0; i < spans.length; i++) {
+    const ix = i * 3;
+    const wx = p[ix]!;
+    const wy = p[ix + 1]!;
+    const wz = p[ix + 2]!;
+    setRimDisplayWorld(wx, wy, wz, ctx, _seedLblWorld);
+    _seedLblView.copy(_seedLblWorld).applyMatrix4(camera.matrixWorldInverse);
+    if (_seedLblView.z >= 0) {
+      spans[i].style.visibility = "hidden";
+      continue;
+    }
+    _seedLblNdc.copy(_seedLblWorld).project(camera);
+    spans[i].style.visibility = "visible";
+    const sx = (_seedLblNdc.x * 0.5 + 0.5) * w + ox;
+    const sy = (-_seedLblNdc.y * 0.5 + 0.5) * h + oy;
+    spans[i].style.transform = `translate(${sx}px, ${sy}px)`;
+  }
+}
+
 function applySceneToBall(
   ctx: BallCtx,
   buf: SceneBuffers3d | null,
   orbitRef: RefObject<OrbitState>,
   camera: InstanceType<typeof PerspectiveCamera>,
   sizing: BallDisplaySizing,
+  pathOverlay: PathOverlayBuffer | null,
+  pathOverlayOpacityMult: number,
+  showSeedLabels: boolean,
 ) {
-  const { scene3 } = ctx;
-  disposeLine(ctx.lineBg, scene3);
-  disposeLine(ctx.lineBoth, scene3);
-  disposeLine(ctx.lineOne, scene3);
-  disposeInst(ctx.meshOther, scene3);
-  disposeInst(ctx.meshSeeds, scene3);
-  ctx.lineBg = ctx.lineBoth = ctx.lineOne = ctx.meshOther = ctx.meshSeeds = null;
-  if (!buf) return;
+  const parent = ctx.contentRoot;
+  const gamma = ctx.rimGammaRef.current ?? 1;
+  disposeLine(ctx.lineBg, parent);
+  disposeWideLineSegments2(ctx.lineBoth, parent);
+  disposeLine(ctx.lineOne, parent);
+  disposeWideLineSegments2(ctx.linePath, parent);
+  disposeInst(ctx.meshOther, parent);
+  disposeInst(ctx.meshSeeds, parent);
+  ctx.lineBg = ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
+  if (!buf) {
+    syncBallSeedLabels(ctx, null, showSeedLabels);
+    return;
+  }
 
-  const mkLine = (positions: Float32Array, color: number, opacity: number) => {
-    if (positions.length < 6) return null;
+  const mkLine = (positions: Float32Array, nFloats: number, color: number, opacity: number) => {
+    if (nFloats < 6) return null;
+    const dst = new Float32Array(nFloats);
+    fillRimGammaPositions(positions, nFloats, gamma, dst);
     const g = new BufferGeometry();
-    g.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    g.setAttribute("position", new Float32BufferAttribute(dst, 3));
     const mat = new LineBasicMaterial({
       color,
       transparent: true,
@@ -163,18 +311,54 @@ function applySceneToBall(
       depthWrite: false,
     });
     const ln = new LineSegments(g, mat);
-    scene3.add(ln);
+    parent.add(ln);
     return ln;
   };
 
   if (buf.nLineBgVerts > 0) {
-    ctx.lineBg = mkLine(buf.lineBgPositions, 0xffc8a0, 0.12);
+    ctx.lineBg = mkLine(buf.lineBgPositions, buf.nLineBgVerts, 0xffc8a0, 0.12);
   }
   if (buf.nLineBothVerts > 0) {
-    ctx.lineBoth = mkLine(buf.lineBothPositions, 0xff6644, 0.55);
+    const n = buf.nLineBothVerts;
+    if (n >= 6) {
+      const dst = new Float32Array(n);
+      fillRimGammaPositions(buf.lineBothPositions, n, gamma, dst);
+      const geom = new LineSegmentsGeometry();
+      geom.setPositions(dst);
+      const mat = new Line2NodeMaterial({
+        color: 0xff6644,
+        linewidth: BOTH_SEED_LINEWIDTH_3D,
+        transparent: true,
+        opacity: 0.55,
+        depthTest: true,
+        depthWrite: true,
+        toneMapped: false,
+      });
+      const ln = new LineSegments2(geom, mat);
+      ln.renderOrder = 12;
+      parent.add(ln);
+      ctx.lineBoth = ln;
+    }
   }
   if (buf.nLineOneVerts > 0) {
-    ctx.lineOne = mkLine(buf.lineOnePositions, 0x6699ff, 0.35);
+    const n = buf.nLineOneVerts;
+    if (n >= 6) {
+      const dst = new Float32Array(n);
+      fillRimGammaPositions(buf.lineOnePositions, n, gamma, dst);
+      const g = new BufferGeometry();
+      g.setAttribute("position", new Float32BufferAttribute(dst, 3));
+      const blueOp = Math.max(0.02, Math.min(1, sizing.edgeOpacity));
+      const mat = new LineBasicMaterial({
+        color: 0x6699ff,
+        transparent: true,
+        opacity: blueOp,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      });
+      const ln = new LineSegments(g, mat);
+      parent.add(ln);
+      ctx.lineOne = ln;
+    }
   }
 
   const camDist = orbitRef.current?.distance ?? CAM_REF_DIST;
@@ -194,16 +378,23 @@ function applySceneToBall(
         ? clampedRadialScale(r, sizing.radialMin, sizing.radialMax, sizing.nodeMinMul)
         : 1;
       const s = SEED_BALL_BASE * sizing.nodeSizeMul * zm * rad;
-      _m4.compose(_v3.set(x, y, z), _qId, _vScale.set(s, s, s));
+      _v3.set(x, y, z);
+      rimBallMapInPlace(_v3, gamma);
+      _m4.compose(_v3, _qId, _vScale.set(s, s, s));
       mesh.setMatrixAt(i, _m4);
     }
     mesh.instanceMatrix.needsUpdate = true;
-    scene3.add(mesh);
+    parent.add(mesh);
     ctx.meshSeeds = mesh;
   } else seedGeom.dispose();
 
   const otherGeom = new SphereGeometry(1, 12, 10);
-  const otherMat = new MeshBasicMaterial({ color: 0x55cc77 });
+  const otherMat = new MeshBasicMaterial({
+    color: 0x55cc77,
+    transparent: true,
+    opacity: 0.4,
+    depthWrite: false,
+  });
   if (buf.nPointsOther > 0) {
     const mesh = new InstancedMesh(otherGeom, otherMat, buf.nPointsOther);
     for (let i = 0; i < buf.nPointsOther; i++) {
@@ -215,14 +406,40 @@ function applySceneToBall(
       const rad = sizing.centerWeighted
         ? clampedRadialScale(r, sizing.radialMin, sizing.radialMax, sizing.nodeMinMul)
         : 1;
-      const s = OTHER_BALL_BASE * sizing.nodeSizeMul * zm * rad;
-      _m4.compose(_v3.set(x, y, z), _qId, _vScale.set(s, s, s));
+      const s = OTHER_BALL_BASE * OTHER_BALL_VISUAL_SCALE * sizing.nodeSizeMul * zm * rad;
+      _v3.set(x, y, z);
+      rimBallMapInPlace(_v3, gamma);
+      _m4.compose(_v3, _qId, _vScale.set(s, s, s));
       mesh.setMatrixAt(i, _m4);
     }
     mesh.instanceMatrix.needsUpdate = true;
-    scene3.add(mesh);
+    parent.add(mesh);
     ctx.meshOther = mesh;
   } else otherGeom.dispose();
+
+  const ov = pathOverlay;
+  if (ov && ov.nFloats > 0 && ov.positions.length >= ov.nFloats) {
+    const pathDst = new Float32Array(ov.nFloats);
+    fillRimGammaPositions(ov.positions, ov.nFloats, gamma, pathDst);
+    const geomPath = new LineSegmentsGeometry();
+    geomPath.setPositions(pathDst);
+    const om = Math.max(0, Math.min(1, pathOverlayOpacityMult));
+    const mat = new Line2NodeMaterial({
+      color: 0xff9922,
+      linewidth: PATH_OVERLAY_LINEWIDTH_3D,
+      transparent: true,
+      opacity: PATH_OVERLAY_OPACITY_BASE * om,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const ln = new LineSegments2(geomPath, mat);
+    ln.renderOrder = 6;
+    parent.add(ln);
+    ctx.linePath = ln;
+  }
+
+  syncBallSeedLabels(ctx, buf, showSeedLabels);
 
   orbitToPosition(orbitRef.current, camera.position);
   camera.lookAt(0, 0, 0);
@@ -238,6 +455,7 @@ function refreshBallNodeScales(
   const camDist = orbitRef.current?.distance ?? CAM_REF_DIST;
   const zm = nodeZoomMultiplier(camDist, sizing.compensateZoomNodes);
 
+  const gamma = ctx.rimGammaRef.current ?? 1;
   if (ctx.meshSeeds && buf.nPointsSeed > 0) {
     const mesh = ctx.meshSeeds;
     for (let i = 0; i < buf.nPointsSeed; i++) {
@@ -250,7 +468,9 @@ function refreshBallNodeScales(
         ? clampedRadialScale(r, sizing.radialMin, sizing.radialMax, sizing.nodeMinMul)
         : 1;
       const s = SEED_BALL_BASE * sizing.nodeSizeMul * zm * rad;
-      _m4.compose(_v3.set(x, y, z), _qId, _vScale.set(s, s, s));
+      _v3.set(x, y, z);
+      rimBallMapInPlace(_v3, gamma);
+      _m4.compose(_v3, _qId, _vScale.set(s, s, s));
       mesh.setMatrixAt(i, _m4);
     }
     mesh.instanceMatrix.needsUpdate = true;
@@ -266,8 +486,10 @@ function refreshBallNodeScales(
       const rad = sizing.centerWeighted
         ? clampedRadialScale(r, sizing.radialMin, sizing.radialMax, sizing.nodeMinMul)
         : 1;
-      const s = OTHER_BALL_BASE * sizing.nodeSizeMul * zm * rad;
-      _m4.compose(_v3.set(x, y, z), _qId, _vScale.set(s, s, s));
+      const s = OTHER_BALL_BASE * OTHER_BALL_VISUAL_SCALE * sizing.nodeSizeMul * zm * rad;
+      _v3.set(x, y, z);
+      rimBallMapInPlace(_v3, gamma);
+      _m4.compose(_v3, _qId, _vScale.set(s, s, s));
       mesh.setMatrixAt(i, _m4);
     }
     mesh.instanceMatrix.needsUpdate = true;
@@ -303,7 +525,8 @@ function pickGraphIndexAtEvent(
   let bestD2 = Infinity;
   let bestGid: number | null = null;
   const pushCand = (gx: number, gy: number, gz: number, gid: number) => {
-    _v3.set(gx, gy, gz).project(camera);
+    setRimDisplayWorld(gx, gy, gz, ctx, _v3);
+    _v3.project(camera);
     const sx = (0.5 * _v3.x + 0.5) * w + rect.left;
     const sy = (-0.5 * _v3.y + 0.5) * h + rect.top;
     const d2 = (sx - e.clientX) ** 2 + (sy - e.clientY) ** 2;
@@ -326,6 +549,7 @@ function pickGraphIndexAtEvent(
 
 export type BallView3dProps = {
   scene: SceneBuffers3d | null;
+  pathOverlay: PathOverlayBuffer | null;
   webGpuError: string | null;
   showSeedLabels: boolean;
   nodeInteractionRef: RefObject<BallView3dNodeInteraction | null>;
@@ -335,13 +559,15 @@ export type BallView3dProps = {
   nodeSizeMul: number;
   compensateZoomNodes: boolean;
   nodeMinMul: number;
+  edgeOpacity: number;
 };
 
 export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function BallView3d(
   {
     scene,
+    pathOverlay,
     webGpuError,
-    showSeedLabels: _showSeedLabels,
+    showSeedLabels,
     nodeInteractionRef,
     centerWeightedSizes,
     radialScaleMin,
@@ -349,6 +575,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
   }: BallView3dProps,
   ref,
 ) {
@@ -356,6 +583,9 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
   const ctxRef = useRef<BallCtx | null>(null);
   const sceneRef = useRef(scene);
   const orbitRef = useRef<OrbitState>(defaultOrbit());
+  const pathOverlayRef = useRef<PathOverlayBuffer | null>(null);
+  const pathOverlayOpacityMultRef = useRef(1);
+  const showLabelsRef = useRef(showSeedLabels);
   const dragRef = useRef({ active: false, downX: 0, downY: 0, lastX: 0, lastY: 0 });
   const ballSizingRef = useRef<BallDisplaySizing>({
     centerWeighted: centerWeightedSizes,
@@ -364,11 +594,22 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
   });
+  /** Rim power map γ for ball (same role as disk `rimPreservingGamma`). */
+  const ballRimGammaRef = useRef(1);
 
   useLayoutEffect(() => {
     sceneRef.current = scene;
   }, [scene]);
+
+  useLayoutEffect(() => {
+    pathOverlayRef.current = pathOverlay ?? null;
+  }, [pathOverlay]);
+
+  useLayoutEffect(() => {
+    showLabelsRef.current = showSeedLabels;
+  }, [showSeedLabels]);
 
   useLayoutEffect(() => {
     ballSizingRef.current = {
@@ -378,25 +619,72 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       nodeSizeMul,
       compensateZoomNodes,
       nodeMinMul,
+      edgeOpacity,
     };
-  }, [centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul, compensateZoomNodes, nodeMinMul]);
+  }, [
+    centerWeightedSizes,
+    radialScaleMin,
+    radialScaleMax,
+    nodeSizeMul,
+    compensateZoomNodes,
+    nodeMinMul,
+    edgeOpacity,
+  ]);
 
   useImperativeHandle(ref, () => ({
     resetView() {
       orbitRef.current = defaultOrbit();
+      ballRimGammaRef.current = 1;
       const c = ctxRef.current;
+      const buf = sceneRef.current;
       if (c) {
+        c.contentRoot.quaternion.identity();
         orbitToPosition(orbitRef.current, c.camera.position);
         c.camera.lookAt(0, 0, 0);
-        const buf = sceneRef.current;
-        if (buf) refreshBallNodeScales(c, buf, orbitRef, ballSizingRef.current);
+        if (buf) {
+          applySceneToBall(
+            c,
+            buf,
+            orbitRef,
+            c.camera,
+            ballSizingRef.current,
+            pathOverlayRef.current,
+            pathOverlayOpacityMultRef.current,
+            showLabelsRef.current,
+          );
+        }
       }
     },
     applySceneBuffers(buf: SceneBuffers3d | null) {
       sceneRef.current = buf;
       const c = ctxRef.current;
       if (!c) return;
-      applySceneToBall(c, buf, orbitRef, c.camera, ballSizingRef.current);
+      applySceneToBall(
+        c,
+        buf,
+        orbitRef,
+        c.camera,
+        ballSizingRef.current,
+        pathOverlayRef.current,
+        pathOverlayOpacityMultRef.current,
+        showLabelsRef.current,
+      );
+    },
+    setPathOverlayOpacityMultiplier(mult: number) {
+      pathOverlayOpacityMultRef.current = Math.max(0, Math.min(1, mult));
+      const c = ctxRef.current;
+      const buf = sceneRef.current;
+      if (!c) return;
+      applySceneToBall(
+        c,
+        buf,
+        orbitRef,
+        c.camera,
+        ballSizingRef.current,
+        pathOverlayRef.current,
+        pathOverlayOpacityMultRef.current,
+        showLabelsRef.current,
+      );
     },
     fitSubgraphToView() {
       const buf = sceneRef.current;
@@ -437,12 +725,19 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     const ballMat = new LineBasicMaterial({
       color: 0x5a5a68,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.175,
       depthWrite: false,
     });
     const ballWire = new LineSegments(edges, ballMat);
     scene3.add(ballWire);
     ballGeom.dispose();
+
+    const contentRoot = new Group();
+    scene3.add(contentRoot);
+
+    const labelsLayer = document.createElement("div");
+    labelsLayer.className = "diskSeedLabels";
+    labelsLayer.setAttribute("aria-hidden", "true");
 
     const nodeTipEl = document.createElement("div");
     nodeTipEl.className = "diskNodeTooltip";
@@ -461,13 +756,39 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       lineOne: null,
       meshOther: null,
       meshSeeds: null,
+      linePath: null,
       ballWire,
+      contentRoot,
+      rimGammaRef: ballRimGammaRef,
       nodeTipEl,
       raycaster,
       ndcPointer,
+      labelsLayer,
+      labelSpans: [],
       raf: 0,
     };
     ctxRef.current = ctx;
+
+    let shiftHeld = false;
+    const syncShiftFromEvent = (e: PointerEvent | KeyboardEvent | WheelEvent) => {
+      if (typeof e.getModifierState === "function") {
+        shiftHeld = e.getModifierState("Shift");
+      } else {
+        shiftHeld = "shiftKey" in e && e.shiftKey === true;
+      }
+    };
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Shift") shiftHeld = true;
+    };
+    const onWindowKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift") shiftHeld = false;
+    };
+    const onWindowBlur = () => {
+      shiftHeld = false;
+    };
+    window.addEventListener("keydown", onWindowKeyDown);
+    window.addEventListener("keyup", onWindowKeyUp);
+    window.addEventListener("blur", onWindowBlur);
 
     const hideNodeTip = () => {
       nodeTipEl.style.display = "none";
@@ -511,11 +832,36 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      syncShiftFromEvent(e);
+      const shiftWheel =
+        shiftHeld ||
+        e.shiftKey ||
+        (typeof e.getModifierState === "function" && e.getModifierState("Shift"));
+      const buf = sceneRef.current;
+      if (shiftWheel) {
+        const g = ballRimGammaRef.current;
+        ballRimGammaRef.current = Math.min(
+          VIEWER_RIM_GAMMA_MAX,
+          Math.max(VIEWER_RIM_GAMMA_MIN, g * Math.exp(-e.deltaY * VIEWER_RIM_WHEEL_SENS)),
+        );
+        if (buf) {
+          applySceneToBall(
+            ctx,
+            buf,
+            orbitRef,
+            camera,
+            ballSizingRef.current,
+            pathOverlayRef.current,
+            pathOverlayOpacityMultRef.current,
+            showLabelsRef.current,
+          );
+        }
+        return;
+      }
       const o = orbitRef.current;
       o.distance = Math.min(24, Math.max(0.9, o.distance * Math.exp(e.deltaY * 0.0012)));
       orbitToPosition(o, camera.position);
       camera.lookAt(0, 0, 0);
-      const buf = sceneRef.current;
       if (buf && ballSizingRef.current.compensateZoomNodes) {
         refreshBallNodeScales(ctx, buf, orbitRef, ballSizingRef.current);
       }
@@ -523,6 +869,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
 
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
+      syncShiftFromEvent(e);
       dragRef.current = {
         active: true,
         downX: e.clientX,
@@ -535,6 +882,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     };
 
     const onPointerMove = (e: PointerEvent) => {
+      syncShiftFromEvent(e);
       const buf = sceneRef.current;
       const nip = nodeInteractionRef?.current;
       if (dragRef.current.active) {
@@ -542,13 +890,23 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         const dy = e.clientY - dragRef.current.lastY;
         dragRef.current.lastX = e.clientX;
         dragRef.current.lastY = e.clientY;
-        const o = orbitRef.current;
-        o.yaw += dx * 0.0055;
-        o.pitch = Math.max(-1.45, Math.min(1.45, o.pitch + dy * 0.0055));
-        orbitToPosition(o, camera.position);
-        camera.lookAt(0, 0, 0);
-        if (buf && ballSizingRef.current.compensateZoomNodes) {
-          refreshBallNodeScales(ctx, buf, orbitRef, ballSizingRef.current);
+        if (shiftHeld) {
+          camera.updateMatrixWorld();
+          _dragAxisRight.set(1, 0, 0).transformDirection(camera.matrixWorld);
+          _dragAxisUp.set(0, 1, 0).transformDirection(camera.matrixWorld);
+          _qDragH.setFromAxisAngle(_dragAxisUp, -dx * SHIFT_BALL_DRAG_ROT);
+          _qDragV.setFromAxisAngle(_dragAxisRight, -dy * SHIFT_BALL_DRAG_ROT);
+          _qDragDelta.multiplyQuaternions(_qDragH, _qDragV);
+          contentRoot.quaternion.premultiply(_qDragDelta);
+        } else {
+          const o = orbitRef.current;
+          o.yaw += dx * 0.0055;
+          o.pitch = Math.max(-1.45, Math.min(1.45, o.pitch + dy * 0.0055));
+          orbitToPosition(o, camera.position);
+          camera.lookAt(0, 0, 0);
+          if (buf && ballSizingRef.current.compensateZoomNodes) {
+            refreshBallNodeScales(ctx, buf, orbitRef, ballSizingRef.current);
+          }
         }
       } else if (nip && buf) {
         const gid = pickGraphIndexAtEvent(e, renderer.domElement, camera, buf, ctx);
@@ -558,6 +916,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      syncShiftFromEvent(e);
       const wasDrag =
         Math.hypot(e.clientX - dragRef.current.downX, e.clientY - dragRef.current.downY) > 5;
       dragRef.current.active = false;
@@ -570,7 +929,9 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       const nip = nodeInteractionRef?.current;
       if (!wasDrag && nip && buf) {
         const shiftPick =
-          e.shiftKey || (typeof e.getModifierState === "function" && e.getModifierState("Shift"));
+          shiftHeld ||
+          e.shiftKey ||
+          (typeof e.getModifierState === "function" && e.getModifierState("Shift"));
         const gid = pickGraphIndexAtEvent(e, renderer.domElement, camera, buf, ctx);
         if (gid !== null) {
           if (shiftPick && nip.shiftPickGraphIndex) nip.shiftPickGraphIndex(gid);
@@ -591,6 +952,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     const loop = () => {
       ctx.raf = requestAnimationFrame(loop);
       renderer.render(scene3, camera);
+      updateBallSeedLabelPositions(ctx, sceneRef.current, showLabelsRef.current);
     };
 
     void (async () => {
@@ -598,6 +960,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         await renderer.init();
         if (disposed) return;
         host.appendChild(renderer.domElement);
+        host.appendChild(labelsLayer);
         host.appendChild(nodeTipEl);
         renderer.domElement.style.display = "block";
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -612,7 +975,16 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         el.addEventListener("pointerup", onPointerUp);
         el.addEventListener("pointercancel", onPointerUp);
         el.addEventListener("pointerleave", onPointerLeave);
-        applySceneToBall(ctx, sceneRef.current, orbitRef, camera, ballSizingRef.current);
+        applySceneToBall(
+          ctx,
+          sceneRef.current,
+          orbitRef,
+          camera,
+          ballSizingRef.current,
+          pathOverlayRef.current,
+          pathOverlayOpacityMultRef.current,
+          showLabelsRef.current,
+        );
         loop();
       } catch (err) {
         console.error(err);
@@ -625,6 +997,9 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       disposed = true;
       cancelAnimationFrame(ctx.raf);
       ro.disconnect();
+      window.removeEventListener("keydown", onWindowKeyDown);
+      window.removeEventListener("keyup", onWindowKeyUp);
+      window.removeEventListener("blur", onWindowBlur);
       const el = ctx.renderer.domElement;
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("pointerdown", onPointerDown);
@@ -632,11 +1007,14 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       el.removeEventListener("pointerup", onPointerUp);
       el.removeEventListener("pointercancel", onPointerUp);
       el.removeEventListener("pointerleave", onPointerLeave);
-      disposeLine(ctx.lineBg, scene3);
-      disposeLine(ctx.lineBoth, scene3);
-      disposeLine(ctx.lineOne, scene3);
-      disposeInst(ctx.meshOther, scene3);
-      disposeInst(ctx.meshSeeds, scene3);
+      const cr = ctx.contentRoot;
+      disposeLine(ctx.lineBg, cr);
+      disposeWideLineSegments2(ctx.lineBoth, cr);
+      disposeLine(ctx.lineOne, cr);
+      disposeWideLineSegments2(ctx.linePath, cr);
+      disposeInst(ctx.meshOther, cr);
+      disposeInst(ctx.meshSeeds, cr);
+      scene3.remove(cr);
       if (ctx.ballWire) {
         scene3.remove(ctx.ballWire);
         ctx.ballWire.geometry.dispose();
@@ -645,6 +1023,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       ctxRef.current = null;
       renderer.dispose();
       if (host.contains(el)) host.removeChild(el);
+      if (labelsLayer.parentElement === host) host.removeChild(labelsLayer);
       if (nodeTipEl.parentElement === host) host.removeChild(nodeTipEl);
     };
   }, [webGpuError]);
@@ -652,16 +1031,28 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
   useEffect(() => {
     const c = ctxRef.current;
     if (!c || webGpuError) return;
-    applySceneToBall(c, scene, orbitRef, c.camera, ballSizingRef.current);
+    applySceneToBall(
+      c,
+      scene,
+      orbitRef,
+      c.camera,
+      ballSizingRef.current,
+      pathOverlayRef.current,
+      pathOverlayOpacityMultRef.current,
+      showSeedLabels,
+    );
   }, [
     scene,
+    pathOverlay,
     webGpuError,
+    showSeedLabels,
     centerWeightedSizes,
     radialScaleMin,
     radialScaleMax,
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
   ]);
 
   const hostStyle = {

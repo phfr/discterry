@@ -24,3 +24,8 @@ export const RIM_CULL_EPS = 0;
 
 /** Upper bound for the rim-cull slider in the UI (larger = more aggressive hiding). */
 export const RIM_CULL_EPS_SLIDER_MAX = 0.04;
+
+/** Shift+wheel “rim power” viewer map w ↦ |w|^(γ−1) w (|w|=1 fixed); disk and 3D ball share these bounds. */
+export const VIEWER_RIM_GAMMA_MIN = 0.38;
+export const VIEWER_RIM_GAMMA_MAX = 2.4;
+export const VIEWER_RIM_WHEEL_SENS = 0.0014;

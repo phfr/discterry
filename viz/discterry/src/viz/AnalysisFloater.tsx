@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GraphBundle } from "../data/loadBundle";
+import type { GraphBundle3d } from "../data/loadBundle3d";
 import type { Complex } from "../math/mobius";
 import type { GraphCSR } from "../model/graphSearch";
 import {
   buildOrderedSeedIndices,
   collectScatterPoints,
   fillEuclideanWPairMatrix,
+  fillEuclideanWPairMatrix3d,
   fillGraphHopPairMatrix,
   fillHyperbolicPairMatrix,
+  fillHyperbolicPairMatrixBall,
   fillMobiusW,
+  fillMobiusWBall,
   pearsonCorrelation,
   SEED_PAIR_METRICS_MAX_SEEDS,
 } from "../model/seedPairMetrics";
@@ -92,9 +96,11 @@ function norm3(a: number, b: number, c: number): [number, number, number] {
   return [a / n, b / n, c / n];
 }
 
+type AnalysisBundle = GraphBundle | GraphBundle3d;
+
 function drawDegreeMetricScatter(
   canvas: HTMLCanvasElement,
-  bundle: GraphBundle,
+  bundle: AnalysisBundle,
   degrees: Int32Array,
   stride: number,
   yMetric: DegYMetric,
@@ -181,7 +187,7 @@ function drawSeedCosineHeatmap(
   canvas: HTMLCanvasElement,
   cssW: number,
   cssH: number,
-  bundle: GraphBundle,
+  bundle: AnalysisBundle,
   seedNames: string[],
 ) {
   const w = cssW;
@@ -459,11 +465,15 @@ function drawSeedPairScatter(
 type Props = {
   open: boolean;
   onClose: () => void;
-  bundle: GraphBundle | null;
+  bundle: AnalysisBundle | null;
+  /** Disk vs Poincaré ball chart (seed-pair W coords use z₀ or p₀). */
+  chartMode: "2d" | "3d";
   degrees: Int32Array | null;
   /** Applied seed names (order preserved for matrix labels). */
   seedNamesOrdered: string[];
   z0: Complex | null;
+  /** Ball focus; used when ``chartMode === "3d"``. */
+  p0Ball: { x: number; y: number; z: number } | null;
   csr: GraphCSR | null;
 };
 
@@ -471,9 +481,11 @@ export function AnalysisFloater({
   open,
   onClose,
   bundle,
+  chartMode,
   degrees,
   seedNamesOrdered,
   z0,
+  p0Ball,
   csr,
 }: Props) {
   const [tab, setTab] = useState<TabId>("deg");
@@ -505,18 +517,27 @@ export function AnalysisFloater({
 
   const seedPairMatrices = useMemo((): SeedPairMatrices | null => {
     if (tab !== "seedPairs" || !bundle) return null;
-    if (!z0) return { error: "No focus embedding (z₀). Set a focus protein." };
     const { idx, names } = buildOrderedSeedIndices(bundle, seedNamesOrdered);
     if (idx.length < 2) return { error: "Need ≥2 applied seeds." };
     const n = bundle.vertex.length;
     const wx = new Float32Array(n);
     const wy = new Float32Array(n);
-    fillMobiusW(bundle, z0, wx, wy);
     const k = idx.length;
     const hyp = new Float32Array(k * k);
     const eucl = new Float32Array(k * k);
-    fillHyperbolicPairMatrix(wx, wy, idx, hyp);
-    fillEuclideanWPairMatrix(wx, wy, idx, eucl);
+    if (chartMode === "3d") {
+      if (!p0Ball) return { error: "No ball focus (p₀). Set a focus protein." };
+      const b = bundle as GraphBundle3d;
+      const wz = new Float32Array(n);
+      fillMobiusWBall(b, p0Ball.x, p0Ball.y, p0Ball.z, wx, wy, wz);
+      fillHyperbolicPairMatrixBall(wx, wy, wz, idx, hyp);
+      fillEuclideanWPairMatrix3d(wx, wy, wz, idx, eucl);
+    } else {
+      if (!z0) return { error: "No focus embedding (z₀). Set a focus protein." };
+      fillMobiusW(bundle as GraphBundle, z0, wx, wy);
+      fillHyperbolicPairMatrix(wx, wy, idx, hyp);
+      fillEuclideanWPairMatrix(wx, wy, idx, eucl);
+    }
     let hops: Int32Array | null = null;
     let hopError: string | null = null;
     if (csr && (seedPairView === "hops" || seedPairView === "scatter")) {
@@ -529,7 +550,7 @@ export function AnalysisFloater({
       }
     }
     return { k, idx, names, hyp, eucl, hops, hopError };
-  }, [tab, bundle, z0, seedNamesOrdered, csr, seedPairView]);
+  }, [tab, bundle, chartMode, z0, p0Ball, seedNamesOrdered, csr, seedPairView]);
 
   const seedPairSummary = useMemo(() => {
     if (tab !== "seedPairs" || !seedPairMatrices) return null;
@@ -570,8 +591,9 @@ export function AnalysisFloater({
       }
       hopPart = ` Mean graph hops (connected pairs): ${cntG ? (sumG / cntG).toFixed(2) : "—"}. Disconnected pairs: ${disc}.`;
     }
-    return `${k} seeds. Mean hyperbolic W (pairs): ${meanHyp !== null ? meanHyp.toFixed(4) : "—"}. Mean |ΔW|₂ (pairs): ${meanEucl !== null ? meanEucl.toFixed(4) : "—"}.${hopPart}`;
-  }, [tab, seedPairMatrices]);
+    const wLabel = chartMode === "3d" ? "𝔹³ W" : "W";
+    return `${k} seeds. Mean hyperbolic ${wLabel} (pairs): ${meanHyp !== null ? meanHyp.toFixed(4) : "—"}. Mean |ΔW| (pairs): ${meanEucl !== null ? meanEucl.toFixed(4) : "—"}.${hopPart}`;
+  }, [tab, seedPairMatrices, chartMode]);
 
   const redraw = useCallback(() => {
     const el = canvasRef.current;
@@ -614,12 +636,18 @@ export function AnalysisFloater({
       const { k, names, hyp, eucl, hops, hopError } = seedPairMatrices;
       if (seedPairView === "hyp") {
         drawSeedPairHeatmap(el, cwCss, chCss, hyp, k, names, {
-          title: "Hyperbolic distance (W) seed×seed at current focus",
+          title:
+            chartMode === "3d"
+              ? "Hyperbolic distance (𝔹³ W) seed×seed at current focus"
+              : "Hyperbolic distance (W) seed×seed at current focus",
           isHops: false,
         });
       } else if (seedPairView === "eucl") {
         drawSeedPairHeatmap(el, cwCss, chCss, eucl, k, names, {
-          title: "Euclidean chord in W plane seed×seed",
+          title:
+            chartMode === "3d"
+              ? "Euclidean chord in W (ℝ³) seed×seed"
+              : "Euclidean chord in W plane seed×seed",
           isHops: false,
         });
       } else if (seedPairView === "hops") {
@@ -665,6 +693,7 @@ export function AnalysisFloater({
     degYMetric,
     seedPairMatrices,
     seedPairView,
+    chartMode,
   ]);
 
   useEffect(() => {

@@ -13,7 +13,10 @@ import { loadGraphBundle3d, loadMeta3d, type GraphBundle3d } from "./data/loadBu
 import { RIM_CULL_EPS, RIM_CULL_EPS_SLIDER_MAX } from "./math/constants";
 import {
   easeInOutCubic,
+  fillP0BallGeodesic,
   fillZ0Geodesic,
+  p0AtBallGeodesicParameter,
+  P0_GEODESIC_SAMPLES,
   z0AtGeodesicParameter,
   Z0_GEODESIC_SAMPLES,
 } from "./math/focusAnimPath";
@@ -26,10 +29,10 @@ import {
 } from "./model/computeScene";
 import { computeScene3d, type SceneBuffers3d } from "./model/computeScene3d";
 import { bundleToCSR } from "./model/graphSearch";
-import { tryBuildPrimMstOverlay } from "./model/primMstOverlay";
+import { tryBuildPrimMstOverlay, tryBuildPrimMstOverlay3d } from "./model/primMstOverlay";
 import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
-import { p0FromProtein } from "./p0FromProtein";
+import { p0FromProtein, type Vec3 } from "./p0FromProtein";
 import {
   nodeDiskHoverTooltipForGraph3d,
   nodeDiskHoverTooltipForIndex,
@@ -144,6 +147,7 @@ export default function App() {
   const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
   const [compensateZoomNodes, setCompensateZoomNodes] = useState(true);
   const [nodeMinMul, setNodeMinMul] = useState(DEFAULT_NODE_MIN_MUL);
+  const [edgeOpacity, setEdgeOpacity] = useState(0.45);
   const [nonSeedShowMode, setNonSeedShowMode] = useState<NonSeedShowMode>("all");
   const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState(false);
@@ -161,6 +165,7 @@ export default function App() {
   const focusAnimRafRef = useRef(0);
   const isFocusAnimatingRef = useRef(false);
   const z0AnimRef = useRef<Complex | null>(null);
+  const p0AnimRef = useRef<Vec3 | null>(null);
 
   useLayoutEffect(() => {
     appliedFocusRef.current = appliedFocus;
@@ -189,11 +194,11 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  /** M: toggle 2D / 3D (`#3d` hash). Shift+M on 2D disk: Prim MST overlay flash (see keydown handler below). */
+  /** Shift+M: toggle 2D / 3D (`#3d` hash). Plain M on 2D disk: Prim MST overlay (see keydown handler below). */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (analysisKeyboardGuard(e)) return;
-      if (e.code !== "KeyM" || e.shiftKey) return;
+      if (e.code !== "KeyM" || !e.shiftKey) return;
       e.preventDefault();
       window.location.hash = window.location.hash === "#3d" ? "" : "#3d";
     };
@@ -247,7 +252,8 @@ export default function App() {
     isFocusAnimatingRef.current = false;
     setFocusAnimTarget(null);
     z0AnimRef.current = null;
-  }, [appliedSeedsText, rimCullEps, bundle, nonSeedShowMode]);
+    p0AnimRef.current = null;
+  }, [appliedSeedsText, rimCullEps, bundle, bundle3d, nonSeedShowMode]);
 
   useEffect(() => {
     return () => {
@@ -316,6 +322,7 @@ export default function App() {
     cancelPrimMstFadeTimers();
     primMstFlashActiveRef.current = false;
     diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+    ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
     setPathOverlayPinned(null);
   }, [graphInteractionKey, cancelPrimMstFadeTimers]);
 
@@ -324,6 +331,7 @@ export default function App() {
       cancelPrimMstFadeTimers();
       primMstFlashActiveRef.current = false;
       diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+      ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
       setPathOverlayPinned(b && graphInteractionKey ? { buf: b, key: graphInteractionKey } : null);
     },
     [graphInteractionKey, cancelPrimMstFadeTimers],
@@ -399,6 +407,16 @@ export default function App() {
     if (webGpuError) return;
     const onKey = (e: KeyboardEvent) => {
       if (analysisKeyboardGuard(e)) return;
+      if (e.code === "KeyA") {
+        e.preventDefault();
+        setAnalysisOpen((o) => !o);
+        return;
+      }
+      if (e.code === "KeyS") {
+        e.preventDefault();
+        setPathTreesOpen((o) => !o);
+        return;
+      }
       if (bundle3d) {
         if (e.code === "KeyR") {
           e.preventDefault();
@@ -406,6 +424,46 @@ export default function App() {
         } else if (e.code === "KeyF") {
           e.preventDefault();
           ballViewRef.current?.fitSubgraphToView();
+        } else if (e.code === "KeyU" && e.shiftKey) {
+          e.preventDefault();
+          setShowAllGraphEdges((o) => !o);
+        } else if (e.code === "KeyM" && !e.shiftKey) {
+          e.preventDefault();
+          if (!bundle3d || !p0Ball) return;
+          cancelPrimMstFadeTimers();
+          primMstFlashActiveRef.current = false;
+          const r = tryBuildPrimMstOverlay3d(
+            bundle3d,
+            p0Ball.x,
+            p0Ball.y,
+            p0Ball.z,
+            appliedSeedsText,
+          );
+          if (!r.ok) return;
+          primMstFlashActiveRef.current = true;
+          ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
+          setPathOverlayPinned({ buf: r.buf, key: graphInteractionKey });
+          primMstFadeTimeoutRef.current = setTimeout(() => {
+            primMstFadeTimeoutRef.current = null;
+            if (!primMstFlashActiveRef.current) return;
+            const t0 = performance.now();
+            const tick = (now: number) => {
+              if (!primMstFlashActiveRef.current) return;
+              const u = Math.min(1, (now - t0) / PRIM_MST_FLASH_FADE_MS);
+              ballViewRef.current?.setPathOverlayOpacityMultiplier(1 - u);
+              if (u < 1) {
+                primMstFadeRafRef.current = requestAnimationFrame(tick);
+              } else {
+                primMstFadeRafRef.current = 0;
+                if (primMstFlashActiveRef.current) {
+                  setPathOverlayPinned(null);
+                  primMstFlashActiveRef.current = false;
+                }
+                ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
+              }
+            };
+            primMstFadeRafRef.current = requestAnimationFrame(tick);
+          }, PRIM_MST_FLASH_HOLD_MS);
         }
         return;
       }
@@ -416,16 +474,10 @@ export default function App() {
       } else if (e.code === "KeyF") {
         e.preventDefault();
         diskViewRef.current?.fitSubgraphToView();
-      } else if (e.code === "KeyA") {
-        e.preventDefault();
-        setAnalysisOpen((o) => !o);
-      } else if (e.code === "KeyS") {
-        e.preventDefault();
-        setPathTreesOpen((o) => !o);
       } else if (e.code === "KeyU" && e.shiftKey) {
         e.preventDefault();
         setShowAllGraphEdges((o) => !o);
-      } else if (e.code === "KeyM" && e.shiftKey) {
+      } else if (e.code === "KeyM" && !e.shiftKey) {
         e.preventDefault();
         if (!z0Current) return;
         cancelPrimMstFadeTimers();
@@ -469,6 +521,7 @@ export default function App() {
     bundle,
     bundle3d,
     z0Current,
+    p0Ball,
     appliedSeedsText,
     graphInteractionKey,
     cancelPrimMstFadeTimers,
@@ -540,13 +593,97 @@ export default function App() {
         return;
       }
       if (bundle3d) {
-        if (t === appliedFocusRef.current.trim()) return;
+        if (!isFocusAnimatingRef.current && t === appliedFocusRef.current.trim()) return;
+        if (isFocusAnimatingRef.current && t === (focusAnimTargetRef.current ?? "").trim()) return;
+
+        let p0End: Vec3;
         try {
-          p0FromProtein(bundle3d, t);
+          p0End = p0FromProtein(bundle3d, t);
         } catch {
           return;
         }
-        setAppliedFocus(t);
+
+        const seeds = parseSeeds(appliedSeedsText);
+        if (seeds.size === 0) {
+          setAppliedFocus(t);
+          return;
+        }
+
+        if (showAllGraphEdges) {
+          isFocusAnimatingRef.current = false;
+          p0AnimRef.current = null;
+          setFocusAnimTarget(null);
+          setAppliedFocus(t);
+          return;
+        }
+
+        cancelAnimationFrame(focusAnimRafRef.current);
+        const gen = ++focusAnimGenRef.current;
+
+        let p0Start: Vec3;
+        try {
+          const fromName = appliedFocusRef.current.trim();
+          p0Start = p0AnimRef.current ?? p0FromProtein(bundle3d, fromName || t);
+        } catch {
+          setAppliedFocus(t);
+          return;
+        }
+
+        const p0Geo = new Float32Array(P0_GEODESIC_SAMPLES * 3);
+        fillP0BallGeodesic(
+          p0Start.x,
+          p0Start.y,
+          p0Start.z,
+          p0End.x,
+          p0End.y,
+          p0End.z,
+          P0_GEODESIC_SAMPLES,
+          p0Geo,
+        );
+
+        isFocusAnimatingRef.current = true;
+        setFocusAnimTarget(t);
+
+        const FOCUS_MS = 1000;
+        const t0 = performance.now();
+
+        const tick = (now: number) => {
+          if (gen !== focusAnimGenRef.current) return;
+          const tLin = Math.min(1, (now - t0) / FOCUS_MS);
+          const u = easeInOutCubic(tLin);
+          const p0 = p0AtBallGeodesicParameter(p0Geo, P0_GEODESIC_SAMPLES, u);
+          p0AnimRef.current = p0;
+          let buf: SceneBuffers3d | null = null;
+          try {
+            buf = computeScene3d(
+              bundle3d,
+              p0.x,
+              p0.y,
+              p0.z,
+              seeds,
+              rimCullEps,
+              nonSeedShowMode,
+              showAllGraphEdges,
+            );
+          } catch {
+            focusAnimGenRef.current += 1;
+            isFocusAnimatingRef.current = false;
+            p0AnimRef.current = null;
+            setFocusAnimTarget(null);
+            setAppliedFocus(t);
+            return;
+          }
+          ballViewRef.current?.applySceneBuffers(buf);
+          if (tLin < 1) {
+            focusAnimRafRef.current = requestAnimationFrame(tick);
+          } else {
+            isFocusAnimatingRef.current = false;
+            p0AnimRef.current = null;
+            setFocusAnimTarget(null);
+            setAppliedFocus(t);
+          }
+        };
+        focusAnimRafRef.current = requestAnimationFrame(tick);
         return;
       }
       if (!bundle) return;
@@ -669,6 +806,7 @@ export default function App() {
         <BallView3d
           ref={ballViewRef}
           scene={scene as SceneBuffers3d | null}
+          pathOverlay={pathOverlay}
           webGpuError={webGpuError}
           showSeedLabels={showSeedLabels}
           nodeInteractionRef={nodeInteractionRef as RefObject<BallView3dNodeInteraction | null>}
@@ -678,6 +816,7 @@ export default function App() {
           nodeSizeMul={nodeSizeMul}
           compensateZoomNodes={compensateZoomNodes}
           nodeMinMul={nodeMinMul}
+          edgeOpacity={edgeOpacity}
         />
       ) : (
         <DiskView
@@ -693,29 +832,34 @@ export default function App() {
           nodeSizeMul={nodeSizeMul}
           compensateZoomNodes={compensateZoomNodes}
           nodeMinMul={nodeMinMul}
+          edgeOpacity={edgeOpacity}
           nodeInteractionRef={nodeInteractionRef as RefObject<DiskViewNodeInteraction | null>}
         />
       )}
 
-      {!bundle3d ? (
+      {bundle || bundle3d ? (
         <AnalysisFloater
           open={analysisOpen}
           onClose={() => setAnalysisOpen(false)}
-          bundle={bundle}
+          bundle={bundle ?? bundle3d}
+          chartMode={bundle3d ? "3d" : "2d"}
           degrees={degrees}
           seedNamesOrdered={analysisSeedOrder}
           z0={z0Current}
+          p0Ball={p0Ball}
           csr={graphCSR}
         />
       ) : null}
 
-      {!bundle3d ? (
+      {bundle || bundle3d ? (
         <PathTreesFloater
           open={pathTreesOpen}
           onClose={() => setPathTreesOpen(false)}
-          bundle={bundle}
-          scene={scene as SceneBuffers | null}
+          bundle={bundle ?? bundle3d}
+          scene={scene}
+          chartMode={bundle3d ? "3d" : "2d"}
           z0={z0Current}
+          p0Ball={p0Ball}
           csr={graphCSR}
           pickerNames={pickerNames}
           appliedFocus={appliedFocus}
@@ -779,6 +923,22 @@ export default function App() {
               onChange={(e) => setShowCrosshair(e.target.checked)}
             />
             <span>Show crosshair</span>
+          </label>
+          <label
+            className="advancedSlider"
+            title="Opacity of additive blue one-seed edges on the disk and in the 3D ball."
+          >
+            <span className="advancedSliderLabel">Edge opacity</span>
+            <input
+              type="range"
+              min={0.02}
+              max={1}
+              step={0.02}
+              value={edgeOpacity}
+              onChange={(e) => setEdgeOpacity(Number(e.target.value))}
+              aria-valuetext={`edge opacity ${edgeOpacity.toFixed(2)}`}
+            />
+            <span className="advancedSliderVal">{edgeOpacity.toFixed(2)}</span>
           </label>
           <label
             className="advancedSelect"

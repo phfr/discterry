@@ -145,6 +145,8 @@ export type DiskDisplaySizing = {
   compensateZoomNodes: boolean;
   /** Floor on zoom scale and on radial instance scale (rim); keeps nodes from vanishing. */
   nodeMinMul: number;
+  /** Opacity of additive blue one-seed edges (`lineOne`). */
+  edgeOpacity: number;
 };
 
 type Props = {
@@ -160,6 +162,8 @@ type Props = {
   nodeSizeMul: number;
   compensateZoomNodes: boolean;
   nodeMinMul: number;
+  /** Additive blue geodesics (seed–nonseed); clamped in renderer. */
+  edgeOpacity: number;
   nodeInteractionRef?: RefObject<DiskViewNodeInteraction | null>;
 };
 
@@ -388,7 +392,9 @@ function applyBuffers(
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
   } = sizingRef.current;
+  const blueOp = Math.max(0.02, Math.min(1, edgeOpacity));
   const v = viewRef.current;
   const zoom = v.zoom;
   const invZoom = 1 / Math.max(zoom, ZOOM_MIN);
@@ -433,7 +439,7 @@ function applyBuffers(
     const m = new LineBasicMaterial({
       color: 0x6699ff,
       transparent: true,
-      opacity: 0.2,
+      opacity: blueOp,
       blending: AdditiveBlending,
       depthWrite: false,
     });
@@ -552,6 +558,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
     nodeInteractionRef,
   }: Props,
   ref,
@@ -569,6 +576,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
   });
   const pathOverlayRef = useRef<PathOverlayBuffer | null>(null);
   const pathOverlayOpacityMultRef = useRef(1);
@@ -592,8 +600,17 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       nodeSizeMul,
       compensateZoomNodes,
       nodeMinMul,
+      edgeOpacity,
     };
-  }, [centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul, compensateZoomNodes, nodeMinMul]);
+  }, [
+    centerWeightedSizes,
+    radialScaleMin,
+    radialScaleMax,
+    nodeSizeMul,
+    compensateZoomNodes,
+    nodeMinMul,
+    edgeOpacity,
+  ]);
 
   useImperativeHandle(ref, () => ({
     resetView() {
@@ -994,6 +1011,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    edgeOpacity,
     webGpuError,
   ]);
 

@@ -1,16 +1,20 @@
 import type { GraphBundle } from "../data/loadBundle";
+import type { GraphBundle3d } from "../data/loadBundle3d";
 import type { Complex } from "../math/mobius";
 import { mobiusDiskArrays } from "../math/mobius";
+import { mobiusBallArrays } from "../math/poincareBall";
 import type { GraphCSR } from "./graphSearch";
-import { poincareDiskDistance } from "./graphSearch";
+import { poincareBallDistance, poincareDiskDistance } from "./graphSearch";
 
 /** Max seeds for hop matrix / scatter (each extra seed adds a full-graph BFS). */
 export const SEED_PAIR_METRICS_MAX_SEEDS = 40;
 
 export type OrderedSeeds = { idx: number[]; names: string[] };
 
+export type GraphBundleForSeeds = Pick<GraphBundle, "vertex" | "nameToIndex">;
+
 /** Unique bundle indices for applied seed names, preserving first-seen order. */
-export function buildOrderedSeedIndices(bundle: GraphBundle, seedNamesOrdered: string[]): OrderedSeeds {
+export function buildOrderedSeedIndices(bundle: GraphBundleForSeeds, seedNamesOrdered: string[]): OrderedSeeds {
   const idx: number[] = [];
   const names: string[] = [];
   const seen = new Set<number>();
@@ -33,6 +37,18 @@ export function fillMobiusW(
   mobiusDiskArrays(bundle.x, bundle.y, z0, wx, wy, bundle.vertex.length);
 }
 
+export function fillMobiusWBall(
+  bundle: GraphBundle3d,
+  p0x: number,
+  p0y: number,
+  p0z: number,
+  wx: Float32Array,
+  wy: Float32Array,
+  wz: Float32Array,
+): void {
+  mobiusBallArrays(bundle.x, bundle.y, bundle.z, p0x, p0y, p0z, wx, wy, wz, bundle.vertex.length);
+}
+
 /** Symmetric k×k hyperbolic distances in W (upper triangle filled; diagonal 0). */
 export function fillHyperbolicPairMatrix(
   wx: Float32Array,
@@ -47,6 +63,26 @@ export function fillHyperbolicPairMatrix(
       const ib = idx[j]!;
       out[i * k + j] =
         i === j ? 0 : poincareDiskDistance(wx[ia]!, wy[ia]!, wx[ib]!, wy[ib]!);
+    }
+  }
+}
+
+export function fillHyperbolicPairMatrixBall(
+  wx: Float32Array,
+  wy: Float32Array,
+  wz: Float32Array,
+  idx: readonly number[],
+  out: Float32Array,
+): void {
+  const k = idx.length;
+  for (let i = 0; i < k; i++) {
+    const ia = idx[i]!;
+    for (let j = 0; j < k; j++) {
+      const ib = idx[j]!;
+      out[i * k + j] =
+        i === j
+          ? 0
+          : poincareBallDistance(wx[ia]!, wy[ia]!, wz[ia]!, wx[ib]!, wy[ib]!, wz[ib]!);
     }
   }
 }
@@ -68,6 +104,27 @@ export function fillEuclideanWPairMatrix(
       }
       const ib = idx[j]!;
       out[i * k + j] = Math.hypot(wx[ib]! - wx[ia]!, wy[ib]! - wy[ia]!);
+    }
+  }
+}
+
+export function fillEuclideanWPairMatrix3d(
+  wx: Float32Array,
+  wy: Float32Array,
+  wz: Float32Array,
+  idx: readonly number[],
+  out: Float32Array,
+): void {
+  const k = idx.length;
+  for (let i = 0; i < k; i++) {
+    const ia = idx[i]!;
+    for (let j = 0; j < k; j++) {
+      if (i === j) {
+        out[i * k + j] = 0;
+        continue;
+      }
+      const ib = idx[j]!;
+      out[i * k + j] = Math.hypot(wx[ib]! - wx[ia]!, wy[ib]! - wy[ia]!, wz[ib]! - wz[ia]!);
     }
   }
 }
