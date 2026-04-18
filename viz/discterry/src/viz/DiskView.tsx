@@ -40,8 +40,11 @@ import {
 
 const BASE_HALF_EXTENT = 1.06;
 const ZOOM_MIN = 0.45;
-const ZOOM_MAX = 8;
+/** Max zoom-in (ortho half-extent = 1.06 / zoom); 16 = 2× previous cap of 8. */
+const ZOOM_MAX = 16;
 const WHEEL_ZOOM_SENS = 0.0018;
+/** When zoom node compensation is on: blend halfway from 1 to full 1/zoom (screen-stable radius). */
+const ZOOM_NODE_COMP_STRENGTH = 0.5;
 
 export type DiskViewTransform = {
   /** 1 = default framing; larger zooms in (smaller ortho half-extent). */
@@ -53,6 +56,8 @@ export type DiskViewTransform = {
 
 export type DiskViewHandle = {
   resetView: () => void;
+  /** Push GPU buffers without waiting for React `scene` prop (focus animation frames). */
+  applySceneBuffers: (buf: SceneBuffers | null) => void;
 };
 
 function defaultDiskViewTransform(): DiskViewTransform {
@@ -97,6 +102,10 @@ export type DiskDisplaySizing = {
   radialMin: number;
   radialMax: number;
   nodeSizeMul: number;
+  /** If true, shrink world-space node markers partially with zoom (see ZOOM_NODE_COMP_STRENGTH). */
+  compensateZoomNodes: boolean;
+  /** Floor on zoom scale and on radial instance scale (rim); keeps nodes from vanishing. */
+  nodeMinMul: number;
 };
 
 type Props = {
@@ -108,6 +117,8 @@ type Props = {
   radialScaleMin: number;
   radialScaleMax: number;
   nodeSizeMul: number;
+  compensateZoomNodes: boolean;
+  nodeMinMul: number;
 };
 
 type ThreeCtx = {
@@ -147,8 +158,28 @@ function radialScaleFromR(r: number, sMin: number, sMax: number): number {
   return lo + (1 - t) * (hi - lo);
 }
 
-function pointsSpriteSize(nodeMul: number): number {
-  return Math.min(48, Math.max(2, 10 * nodeMul));
+function nodeZoomMultiplier(invZoom: number, compensate: boolean): number {
+  if (!compensate) return 1;
+  return 1 + (invZoom - 1) * ZOOM_NODE_COMP_STRENGTH;
+}
+
+/** Green Points use pixels; scale ~with ortho zoom so behavior matches world-space red disks. */
+function pointsSpriteSize(nodeMul: number, zm: number, zoom: number): number {
+  const z = Math.max(zoom, ZOOM_MIN);
+  const raw = 10 * nodeMul * z * zm;
+  return Math.min(56, Math.max(2, raw));
+}
+
+function clampedRadialScale(
+  r: number,
+  radialMin: number,
+  radialMax: number,
+  nodeMinMul: number,
+): number {
+  const lo = Math.min(radialMin, radialMax);
+  const hi = Math.max(radialMin, radialMax);
+  const s0 = radialScaleFromR(r, radialMin, radialMax);
+  return Math.min(hi, Math.max(lo, Math.max(s0, nodeMinMul)));
 }
 
 function disposeLineMesh(m: InstanceType<typeof LineSegments> | null, scene3: InstanceType<typeof Scene>) {
@@ -227,10 +258,21 @@ function applyBuffers(
   viewRef: RefObject<DiskViewTransform>,
 ) {
   const { scene3 } = ctx;
-  const { centerWeighted: weighted, radialMin, radialMax, nodeSizeMul } = sizingRef.current;
+  const {
+    centerWeighted: weighted,
+    radialMin,
+    radialMax,
+    nodeSizeMul,
+    compensateZoomNodes,
+    nodeMinMul,
+  } = sizingRef.current;
   const M = viewRef.current.mobius;
-  const otherR = OTHER_DISK_RADIUS * nodeSizeMul;
-  const seedR = SEED_DISK_RADIUS * nodeSizeMul;
+  const zoom = viewRef.current.zoom;
+  const invZoom = 1 / Math.max(zoom, ZOOM_MIN);
+  const nodeZoomMul = nodeZoomMultiplier(invZoom, compensateZoomNodes);
+  const zm = Math.max(nodeZoomMul, nodeMinMul);
+  const otherR = OTHER_DISK_RADIUS * nodeSizeMul * zm;
+  const seedR = SEED_DISK_RADIUS * nodeSizeMul * zm;
   disposeLineBothWide(ctx.lineBoth, scene3);
   disposeLineMesh(ctx.lineOne, scene3);
   disposePoints(ctx.ptsOther, scene3);
@@ -271,7 +313,7 @@ function applyBuffers(
       for (let i = 0; i < buf.nPointsOther; i++) {
         const [x, y] = mapWxy(po[i * 3], po[i * 3 + 1], M);
         const z = po[i * 3 + 2];
-        const s = radialScaleFromR(Math.hypot(x, y), radialMin, radialMax);
+        const s = clampedRadialScale(Math.hypot(x, y), radialMin, radialMax, nodeMinMul);
         _vPos.set(x, y, z);
         _m4.compose(_vPos, _qId, _vScale.set(s, s, 1));
         mesh.setMatrixAt(i, _m4);
@@ -297,7 +339,7 @@ function applyBuffers(
       }
       const m = new PointsMaterial({
         color: 0x55dd77,
-        size: pointsSpriteSize(nodeSizeMul),
+        size: pointsSpriteSize(nodeSizeMul, zm, zoom),
         sizeAttenuation: false,
         depthTest: true,
         /* Avoid large sprites writing depth into neighbors' pixels (hides nearby seed points). */
@@ -341,7 +383,7 @@ function applyBuffers(
       const [x, y] = mapWxy(p[i * 3], p[i * 3 + 1], M);
       const z = p[i * 3 + 2];
       if (weighted) {
-        const s = radialScaleFromR(Math.hypot(x, y), radialMin, radialMax);
+        const s = clampedRadialScale(Math.hypot(x, y), radialMin, radialMax, nodeMinMul);
         _vPos.set(x, y, z);
         _m4.compose(_vPos, _qId, _vScale.set(s, s, 1));
         mesh.setMatrixAt(i, _m4);
@@ -368,6 +410,8 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     radialScaleMin,
     radialScaleMax,
     nodeSizeMul,
+    compensateZoomNodes,
+    nodeMinMul,
   }: Props,
   ref,
 ) {
@@ -383,6 +427,8 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     radialMin: radialScaleMin,
     radialMax: radialScaleMax,
     nodeSizeMul,
+    compensateZoomNodes,
+    nodeMinMul,
   });
   useLayoutEffect(() => {
     sceneRef.current = scene;
@@ -399,8 +445,10 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       radialMin: radialScaleMin,
       radialMax: radialScaleMax,
       nodeSizeMul,
+      compensateZoomNodes,
+      nodeMinMul,
     };
-  }, [centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul]);
+  }, [centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul, compensateZoomNodes, nodeMinMul]);
 
   useImperativeHandle(ref, () => ({
     resetView() {
@@ -410,6 +458,13 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         updateOrthographicCamera(c.camera, diskViewTransformRef.current);
         applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
       }
+    },
+    applySceneBuffers(buf: SceneBuffers | null) {
+      sceneRef.current = buf;
+      const c = ctxRef.current;
+      if (!c) return;
+      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef);
+      syncSeedLabelDom(c, buf, showLabelsRef.current);
     },
   }));
 
@@ -479,17 +534,38 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     let dragActive = false;
     let lastPx = 0;
     let lastPy = 0;
+    /** `e.shiftKey` is unreliable on some browsers during `setPointerCapture`; track Shift explicitly. */
+    let shiftHeld = false;
+    const syncShiftFromEvent = (e: PointerEvent | KeyboardEvent) => {
+      if (typeof e.getModifierState === "function") {
+        shiftHeld = e.getModifierState("Shift");
+      } else {
+        shiftHeld = "shiftKey" in e && e.shiftKey === true;
+      }
+    };
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Shift") shiftHeld = true;
+    };
+    const onWindowKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift") shiftHeld = false;
+    };
+    const onWindowBlur = () => {
+      shiftHeld = false;
+    };
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const tr = diskViewTransformRef.current;
       tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
       updateOrthographicCamera(camera, tr);
+      /* Points sprite size scales with zoom; instanced radii when zoom-comp is on — keep buffers in sync. */
+      applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
     };
 
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       dragActive = true;
+      syncShiftFromEvent(e);
       lastPx = e.clientX;
       lastPy = e.clientY;
       (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
@@ -497,6 +573,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
 
     const onPointerMove = (e: PointerEvent) => {
       if (!dragActive) return;
+      syncShiftFromEvent(e);
       const dx = e.clientX - lastPx;
       const dy = e.clientY - lastPy;
       lastPx = e.clientX;
@@ -506,7 +583,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const cw = Math.max(1, canvas.clientWidth);
       const ch = Math.max(1, canvas.clientHeight);
       const worldSpan = (2 * BASE_HALF_EXTENT) / tr.zoom;
-      if (e.shiftKey) {
+      if (shiftHeld) {
         tr.mobius = incrementMobiusFromDrag(tr.mobius, dx, dy, cw, ch);
         applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
       } else {
@@ -540,6 +617,9 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         resize();
         const el = renderer.domElement;
+        window.addEventListener("keydown", onWindowKeyDown);
+        window.addEventListener("keyup", onWindowKeyUp);
+        window.addEventListener("blur", onWindowBlur);
         el.addEventListener("wheel", onWheel, { passive: false });
         el.addEventListener("pointerdown", onPointerDown);
         el.addEventListener("pointermove", onPointerMove);
@@ -562,6 +642,9 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       ro.disconnect();
       if (renderer.domElement.parentElement === host) host.removeChild(renderer.domElement);
       if (labelsLayer.parentElement === host) host.removeChild(labelsLayer);
+      window.removeEventListener("keydown", onWindowKeyDown);
+      window.removeEventListener("keyup", onWindowKeyUp);
+      window.removeEventListener("blur", onWindowBlur);
       renderer.domElement.removeEventListener("wheel", onWheel);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
@@ -584,7 +667,17 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     }
     applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
-  }, [scene, showSeedLabels, centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul, webGpuError]);
+  }, [
+    scene,
+    showSeedLabels,
+    centerWeightedSizes,
+    radialScaleMin,
+    radialScaleMax,
+    nodeSizeMul,
+    compensateZoomNodes,
+    nodeMinMul,
+    webGpuError,
+  ]);
 
   useEffect(() => {
     const ctx = ctxRef.current;

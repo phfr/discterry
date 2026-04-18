@@ -111,9 +111,9 @@ function mobiusSmallTranslate(eps: Complex): Mobius2 {
 }
 
 /** Max |ε| per drag sample to stay inside disk and stable. */
-const EPS_DRAG_CAP = 0.06;
+const EPS_DRAG_CAP = 0.08;
 /** Scale: screen pixels → disk ε (tune for “natural” pan speed). */
-const DRAG_TO_DISK = 0.0028;
+const DRAG_TO_DISK = 0.016;
 
 /**
  * Increment accumulated viewer Möbius from Shift+drag pixel delta (screen coords).

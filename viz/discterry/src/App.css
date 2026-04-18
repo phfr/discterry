@@ -128,33 +128,6 @@
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.45);
 }
 
-.rimSlider {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  font-size: 10px;
-  color: #9a9aa2;
-}
-
-.rimSliderLabel {
-  flex: 0 0 auto;
-  min-width: 1.5rem;
-}
-
-.rimSlider input[type="range"] {
-  flex: 1 1 120px;
-  min-width: 80px;
-  height: 4px;
-  accent-color: #7c9cff;
-}
-
-.rimSliderVal {
-  flex: 0 0 auto;
-  font-variant-numeric: tabular-nums;
-  color: #c8c8d0;
-}
-
 .seedLabelsCb {
   display: flex;
   align-items: center;

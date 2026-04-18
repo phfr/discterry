@@ -1,14 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { loadGraphBundle, loadMeta, type GraphBundle } from "./data/loadBundle";
 import { RIM_CULL_EPS, RIM_CULL_EPS_SLIDER_MAX } from "./math/constants";
+import {
+  easeInOutCubic,
+  fillZ0Geodesic,
+  z0AtGeodesicParameter,
+  Z0_GEODESIC_SAMPLES,
+} from "./math/focusAnimPath";
+import type { Complex } from "./math/mobius";
 import { computeScene, type SceneBuffers, type SceneStats } from "./model/computeScene";
 import { z0FromProtein } from "./z0FromProtein";
 import { DiskView, type DiskViewHandle } from "./viz/DiskView";
 
-const DEFAULT_RADIAL_SCALE_MIN = 0.25;
-const DEFAULT_RADIAL_SCALE_MAX = 2;
+const DEFAULT_RADIAL_SCALE_MIN = 0.2;
+const DEFAULT_RADIAL_SCALE_MAX = 1.3;
 const DEFAULT_NODE_SIZE_MUL = 0.5;
+/** Floor for radial instance scale and for zoom-size multiplier (see DiskView). */
+const DEFAULT_NODE_MIN_MUL = 0.1;
 
 function parseSeeds(text: string): Set<string> {
   const s = new Set<string>();
@@ -82,7 +91,23 @@ export default function App() {
   const [radialScaleMin, setRadialScaleMin] = useState(DEFAULT_RADIAL_SCALE_MIN);
   const [radialScaleMax, setRadialScaleMax] = useState(DEFAULT_RADIAL_SCALE_MAX);
   const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
+  const [compensateZoomNodes, setCompensateZoomNodes] = useState(true);
+  const [nodeMinMul, setNodeMinMul] = useState(DEFAULT_NODE_MIN_MUL);
+  const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
   const diskViewRef = useRef<DiskViewHandle>(null);
+  const appliedFocusRef = useRef(appliedFocus);
+  const focusAnimTargetRef = useRef<string | null>(null);
+  const focusAnimGenRef = useRef(0);
+  const focusAnimRafRef = useRef(0);
+  const isFocusAnimatingRef = useRef(false);
+  const z0AnimRef = useRef<Complex | null>(null);
+
+  useLayoutEffect(() => {
+    appliedFocusRef.current = appliedFocus;
+  }, [appliedFocus]);
+  useLayoutEffect(() => {
+    focusAnimTargetRef.current = focusAnimTarget;
+  }, [focusAnimTarget]);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -111,6 +136,22 @@ export default function App() {
     })();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isFocusAnimatingRef.current) return;
+    focusAnimGenRef.current += 1;
+    cancelAnimationFrame(focusAnimRafRef.current);
+    isFocusAnimatingRef.current = false;
+    setFocusAnimTarget(null);
+    z0AnimRef.current = null;
+  }, [appliedSeedsText, rimCullEps, bundle]);
+
+  useEffect(() => {
+    return () => {
+      focusAnimGenRef.current += 1;
+      cancelAnimationFrame(focusAnimRafRef.current);
     };
   }, []);
 
@@ -154,12 +195,87 @@ export default function App() {
     }
   }, [bundle, seedsDraft, appliedFocus]);
 
-  const onPickFocus = useCallback((name: string) => {
-    setAppliedFocus(name);
-    setFormErr(null);
-  }, []);
+  const onPickFocus = useCallback(
+    (name: string) => {
+      setFormErr(null);
+      const t = name.trim();
+      if (webGpuError) {
+        setAppliedFocus(t);
+        return;
+      }
+      if (!bundle) return;
+      if (!isFocusAnimatingRef.current && t === appliedFocusRef.current.trim()) return;
+      if (isFocusAnimatingRef.current && t === (focusAnimTargetRef.current ?? "").trim()) return;
+
+      cancelAnimationFrame(focusAnimRafRef.current);
+      const gen = ++focusAnimGenRef.current;
+
+      let z0Start: Complex;
+      try {
+        const fromName = appliedFocusRef.current.trim();
+        z0Start = z0AnimRef.current ?? z0FromProtein(bundle, fromName || t);
+      } catch {
+        setAppliedFocus(t);
+        return;
+      }
+      let z0End: Complex;
+      try {
+        z0End = z0FromProtein(bundle, t);
+      } catch {
+        return;
+      }
+
+      const seeds = parseSeeds(appliedSeedsText);
+      if (seeds.size === 0) {
+        setAppliedFocus(t);
+        return;
+      }
+
+      const gx = new Float32Array(Z0_GEODESIC_SAMPLES);
+      const gy = new Float32Array(Z0_GEODESIC_SAMPLES);
+      fillZ0Geodesic(z0Start, z0End, Z0_GEODESIC_SAMPLES, gx, gy);
+
+      isFocusAnimatingRef.current = true;
+      setFocusAnimTarget(t);
+      diskViewRef.current?.resetView();
+
+      const FOCUS_MS = 1000;
+      const t0 = performance.now();
+
+      const tick = (now: number) => {
+        if (gen !== focusAnimGenRef.current) return;
+        const tLin = Math.min(1, (now - t0) / FOCUS_MS);
+        const u = easeInOutCubic(tLin);
+        const z0 = z0AtGeodesicParameter(gx, gy, u);
+        z0AnimRef.current = z0;
+        let buf: SceneBuffers | null = null;
+        try {
+          buf = computeScene(bundle, z0, seeds, rimCullEps);
+        } catch {
+          focusAnimGenRef.current += 1;
+          isFocusAnimatingRef.current = false;
+          z0AnimRef.current = null;
+          setFocusAnimTarget(null);
+          setAppliedFocus(t);
+          return;
+        }
+        diskViewRef.current?.applySceneBuffers(buf);
+        if (tLin < 1) {
+          focusAnimRafRef.current = requestAnimationFrame(tick);
+        } else {
+          isFocusAnimatingRef.current = false;
+          z0AnimRef.current = null;
+          setFocusAnimTarget(null);
+          setAppliedFocus(t);
+        }
+      };
+      focusAnimRafRef.current = requestAnimationFrame(tick);
+    },
+    [bundle, appliedSeedsText, rimCullEps, webGpuError],
+  );
 
   const stats: SceneStats | null = scene?.stats ?? null;
+  const focusUiKey = focusAnimTarget?.trim() || appliedFocus.trim();
 
   return (
     <div className="shell">
@@ -173,6 +289,8 @@ export default function App() {
         radialScaleMin={radialScaleMin}
         radialScaleMax={radialScaleMax}
         nodeSizeMul={nodeSizeMul}
+        compensateZoomNodes={compensateZoomNodes}
+        nodeMinMul={nodeMinMul}
       />
 
       <details className="advancedPanel">
@@ -181,6 +299,17 @@ export default function App() {
           <p className="advancedNavHint">
             Canvas: wheel = zoom, drag = pan. Shift+drag = Möbius pan (hyperbolic).
           </p>
+          <label
+            className="seedLabelsCb"
+            title="When on, green/red node markers shrink partially with Euclidean zoom (50% of full inverse scale) so they grow less on screen. Off = world size unchanged when zooming."
+          >
+            <input
+              type="checkbox"
+              checked={compensateZoomNodes}
+              onChange={(e) => setCompensateZoomNodes(e.target.checked)}
+            />
+            <span>Shrink nodes when zooming (50%)</span>
+          </label>
           <button
             type="button"
             className="resetViewBtn"
@@ -189,6 +318,22 @@ export default function App() {
           >
             Reset view
           </button>
+          <label
+            className="advancedSlider"
+            title="Hide nodes with |W| past the rim band (seeds and seed-touching edges can still be shown)."
+          >
+            <span className="advancedSliderLabel">rimcull</span>
+            <input
+              type="range"
+              min={0}
+              max={RIM_CULL_EPS_SLIDER_MAX}
+              step={0.0005}
+              value={Math.min(rimCullEps, RIM_CULL_EPS_SLIDER_MAX)}
+              onChange={(e) => setRimCullEps(Number(e.target.value))}
+              aria-valuetext={`rimcull ${rimCullEps.toFixed(4)}`}
+            />
+            <span className="advancedSliderVal">{rimCullEps.toFixed(4)}</span>
+          </label>
           <label className="seedLabelsCb">
             <input
               type="checkbox"
@@ -225,6 +370,22 @@ export default function App() {
               aria-valuetext={`node size ${nodeSizeMul.toFixed(2)}×`}
             />
             <span className="advancedSliderVal">{nodeSizeMul.toFixed(2)}×</span>
+          </label>
+          <label
+            className="advancedSlider"
+            title="Raises the smallest nodes: floor on radial scale (when distance sizing is on) and on zoom-size multiplier for disks and green points."
+          >
+            <span className="advancedSliderLabel">Node minimum</span>
+            <input
+              type="range"
+              min={0.02}
+              max={0.55}
+              step={0.01}
+              value={nodeMinMul}
+              onChange={(e) => setNodeMinMul(Number(e.target.value))}
+              aria-valuetext={`node minimum ${nodeMinMul.toFixed(2)}`}
+            />
+            <span className="advancedSliderVal">{nodeMinMul.toFixed(2)}</span>
           </label>
           <label
             className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
@@ -273,19 +434,6 @@ export default function App() {
 
       <div className="floatPanel">
         {loadErr ? <div className="errLine">{loadErr}</div> : null}
-        <label className="rimSlider">
-          <span className="rimSliderLabel">rimcull</span>
-          <input
-            type="range"
-            min={0}
-            max={RIM_CULL_EPS_SLIDER_MAX}
-            step={0.0005}
-            value={Math.min(rimCullEps, RIM_CULL_EPS_SLIDER_MAX)}
-            onChange={(e) => setRimCullEps(Number(e.target.value))}
-            aria-valuetext={`rimcull ${rimCullEps.toFixed(4)}`}
-          />
-          <span className="rimSliderVal">{rimCullEps.toFixed(4)}</span>
-        </label>
         <textarea
           className="seedsTa"
           value={seedsDraft}
@@ -306,7 +454,7 @@ export default function App() {
               <li key={name}>
                 <button
                   type="button"
-                  className={name === appliedFocus.trim() ? "nameBtn nameBtnOn" : "nameBtn"}
+                  className={name === focusUiKey ? "nameBtn nameBtnOn" : "nameBtn"}
                   onClick={() => onPickFocus(name)}
                   title={tip}
                 >
