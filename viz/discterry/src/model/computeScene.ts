@@ -5,6 +5,15 @@ import { poincareGeodesicXY } from "../math/poincareGeodesic";
 import type { GraphBundle } from "../data/loadBundle";
 import { buildSeedMask, classifySeedEdges } from "./graphFilter";
 
+/** Which non-seed vertices get green disk markers (edges are always seed-touching only). */
+export type NonSeedShowMode = "all" | "seed_only" | "seed_and_neighbors";
+
+function includeGreenNonSeed(mode: NonSeedShowMode, seedEdgeVertex: Uint8Array, i: number): boolean {
+  if (mode === "all") return true;
+  if (mode === "seed_only") return false;
+  return seedEdgeVertex[i] === 1;
+}
+
 export type SceneStats = {
   nodesTotal: number;
   nodesRendered: number;
@@ -28,6 +37,10 @@ export type SceneBuffers = {
   lineBothPositions: Float32Array;
   pointsOther: Float32Array;
   pointsSeed: Float32Array;
+  /** Graph vertex index for each `pointsOther` instance (green), same order as triples. */
+  otherGraphIndex: Int32Array;
+  /** Graph vertex index for each `pointsSeed` instance (red). */
+  seedGraphIndex: Int32Array;
   /** Same length as `nPointsSeed`, order matches `pointsSeed` triples. */
   seedLabels: string[];
   nLineOneVerts: number;
@@ -78,6 +91,7 @@ export function computeScene(
   z0: Complex,
   seedNames: Set<string>,
   rimCullEps: number,
+  nonSeedShowMode: NonSeedShowMode,
 ): SceneBuffers {
   const { x: zx, y: zy, src, dst, nameToIndex } = bundle;
   const n = zx.length;
@@ -103,6 +117,8 @@ export function computeScene(
 
   const otherPts: number[] = [];
   const seedPts: number[] = [];
+  const otherIdx: number[] = [];
+  const seedIdx: number[] = [];
   const seedLabels: string[] = [];
   let hiddenNonSeed = 0;
   let sparedSeed = 0;
@@ -114,8 +130,9 @@ export function computeScene(
 
     if (rimWouldCull) {
       if (isSeed[i]) sparedSeed++;
-      else if (seedEdgeVertex[i]) sparedEdge++;
-      else hiddenNonSeed++;
+      else if (seedEdgeVertex[i]) {
+        if (includeGreenNonSeed(nonSeedShowMode, seedEdgeVertex, i)) sparedEdge++;
+      } else hiddenNonSeed++;
     }
 
     if (!show) continue;
@@ -123,9 +140,11 @@ export function computeScene(
     if (isSeed[i]) {
       /* Slight +Z so seeds sit in front of coplanar green sprites at the same (x,y). */
       seedPts.push(wx[i], wy[i], 0.004);
+      seedIdx.push(i);
       seedLabels.push(bundle.vertex[i]);
-    } else {
+    } else if (includeGreenNonSeed(nonSeedShowMode, seedEdgeVertex, i)) {
       otherPts.push(wx[i], wy[i], 0);
+      otherIdx.push(i);
     }
   }
 
@@ -157,6 +176,8 @@ export function computeScene(
     lineOnePositions: lineOnePositions.subarray(0, oo.i),
     pointsOther: Float32Array.from(otherPts),
     pointsSeed: Float32Array.from(seedPts),
+    otherGraphIndex: Int32Array.from(otherIdx),
+    seedGraphIndex: Int32Array.from(seedIdx),
     seedLabels,
     nLineBothVerts: ob.i,
     nLineOneVerts: oo.i,

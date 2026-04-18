@@ -1,0 +1,68 @@
+import type { GraphBundle, MetaJson } from "./data/loadBundle";
+
+function fmtDisk(n: number): string {
+  return Number.isFinite(n) ? n.toFixed(6) : String(n);
+}
+
+function appendRunMetaLines(lines: string[], runMeta: MetaJson | null | undefined): void {
+  if (!runMeta) return;
+  const bits: string[] = [];
+  if (runMeta.beta !== undefined) bits.push(`β=${fmtDisk(runMeta.beta)}`);
+  if (runMeta.mu !== undefined) bits.push(`μ=${fmtDisk(runMeta.mu)}`);
+  if (runMeta.dimension !== undefined) bits.push(`D=${runMeta.dimension}`);
+  if (runMeta.radius_s_d !== undefined) bits.push(`radius_S^D=${fmtDisk(runMeta.radius_s_d)}`);
+  if (runMeta.radius_h_d1 !== undefined) bits.push(`radius_H_D+1=${fmtDisk(runMeta.radius_h_d1)}`);
+  if (runMeta.kappa_min !== undefined) bits.push(`κ_min=${fmtDisk(runMeta.kappa_min)}`);
+  if (bits.length) lines.push(`run: ${bits.join("  ")}`);
+  if (runMeta.run_subdir) lines.push(`run_subdir: ${runMeta.run_subdir}`);
+  if (runMeta.inf_coord_path) lines.push(`inf_coord: ${runMeta.inf_coord_path}`);
+  if (bits.length || runMeta.run_subdir || runMeta.inf_coord_path) lines.push("—");
+}
+
+/** Same text as the focus list `title` — Parquet disk coords, D-Mercator columns, degree, optional run header. */
+export function nodeListTooltip(
+  bundle: GraphBundle,
+  name: string,
+  degree: number | null,
+  runMeta?: MetaJson | null,
+): string {
+  const j = bundle.nameToIndex.get(name);
+  if (j === undefined) return name;
+  const lines: string[] = [];
+  appendRunMetaLines(lines, runMeta);
+
+  const x = bundle.x[j];
+  const y = bundle.y[j];
+  const rz = Math.hypot(x, y);
+  const ang = (Math.atan2(y, x) * 180) / Math.PI;
+  lines.push(
+    `vertex: ${bundle.vertex[j]}`,
+    `index: ${j}`,
+    `disk x: ${fmtDisk(x)}`,
+    `disk y: ${fmtDisk(y)}`,
+    `|z|: ${fmtDisk(rz)}`,
+    `arg z (deg): ${fmtDisk(ang)}`,
+  );
+  if (bundle.infKappa) lines.push(`Inf.Kappa: ${fmtDisk(bundle.infKappa[j]!)}`);
+  if (bundle.infHypRad) lines.push(`Inf.Hyp.Rad: ${fmtDisk(bundle.infHypRad[j]!)}`);
+  if (bundle.infPos1 && bundle.infPos2 && bundle.infPos3) {
+    lines.push(
+      `Inf.Pos.1: ${fmtDisk(bundle.infPos1[j]!)}`,
+      `Inf.Pos.2: ${fmtDisk(bundle.infPos2[j]!)}`,
+      `Inf.Pos.3: ${fmtDisk(bundle.infPos3[j]!)}`,
+    );
+  }
+  lines.push(`degree: ${degree !== null ? String(degree) : "—"}`);
+  return lines.join("\n");
+}
+
+export function nodeListTooltipForIndex(
+  bundle: GraphBundle,
+  graphIndex: number,
+  degrees: Int32Array | null,
+  runMeta?: MetaJson | null,
+): string {
+  if (graphIndex < 0 || graphIndex >= bundle.vertex.length) return "";
+  const d = degrees && graphIndex < degrees.length ? degrees[graphIndex]! : null;
+  return nodeListTooltip(bundle, bundle.vertex[graphIndex]!, d, runMeta);
+}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import { loadGraphBundle, loadMeta, type GraphBundle } from "./data/loadBundle";
+import { loadGraphBundle, loadMeta, type GraphBundle, type MetaJson } from "./data/loadBundle";
 import { RIM_CULL_EPS, RIM_CULL_EPS_SLIDER_MAX } from "./math/constants";
 import {
   easeInOutCubic,
@@ -9,9 +9,15 @@ import {
   Z0_GEODESIC_SAMPLES,
 } from "./math/focusAnimPath";
 import type { Complex } from "./math/mobius";
-import { computeScene, type SceneBuffers, type SceneStats } from "./model/computeScene";
+import {
+  computeScene,
+  type NonSeedShowMode,
+  type SceneBuffers,
+  type SceneStats,
+} from "./model/computeScene";
 import { z0FromProtein } from "./z0FromProtein";
-import { DiskView, type DiskViewHandle } from "./viz/DiskView";
+import { nodeListTooltip, nodeListTooltipForIndex } from "./nodeListTooltip";
+import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
 
 const DEFAULT_RADIAL_SCALE_MIN = 0.2;
 const DEFAULT_RADIAL_SCALE_MAX = 1.3;
@@ -43,30 +49,6 @@ function vertexDegrees(bundle: GraphBundle): Int32Array {
   return d;
 }
 
-function fmtDisk(n: number): string {
-  return Number.isFinite(n) ? n.toFixed(6) : String(n);
-}
-
-/** Native tooltip: every scalar we load for this vertex (parquet `nodes`) plus degree from edges. */
-function nodeListTooltip(bundle: GraphBundle, name: string, degree: number | null): string {
-  const j = bundle.nameToIndex.get(name);
-  if (j === undefined) return name;
-  const x = bundle.x[j];
-  const y = bundle.y[j];
-  const rz = Math.hypot(x, y);
-  const ang = (Math.atan2(y, x) * 180) / Math.PI;
-  const lines = [
-    `vertex: ${bundle.vertex[j]}`,
-    `index: ${j}`,
-    `disk x: ${fmtDisk(x)}`,
-    `disk y: ${fmtDisk(y)}`,
-    `|z|: ${fmtDisk(rz)}`,
-    `arg z (deg): ${fmtDisk(ang)}`,
-    `degree: ${degree !== null ? String(degree) : "—"}`,
-  ];
-  return lines.join("\n");
-}
-
 /** Sorted clickable names: valid applied seeds, plus current focus if in bundle but not listed. */
 function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, appliedFocus: string): string[] {
   const seeds = [...parseSeeds(appliedSeedsText)].filter((n) => bundle.nameToIndex.has(n));
@@ -79,6 +61,7 @@ function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, applied
 
 export default function App() {
   const [bundle, setBundle] = useState<GraphBundle | null>(null);
+  const [runMeta, setRunMeta] = useState<MetaJson | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [seedsDraft, setSeedsDraft] = useState("");
   const [appliedFocus, setAppliedFocus] = useState("");
@@ -93,8 +76,10 @@ export default function App() {
   const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
   const [compensateZoomNodes, setCompensateZoomNodes] = useState(true);
   const [nodeMinMul, setNodeMinMul] = useState(DEFAULT_NODE_MIN_MUL);
+  const [nonSeedShowMode, setNonSeedShowMode] = useState<NonSeedShowMode>("all");
   const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
   const diskViewRef = useRef<DiskViewHandle>(null);
+  const nodeInteractionRef = useRef<DiskViewNodeInteraction | null>(null);
   const appliedFocusRef = useRef(appliedFocus);
   const focusAnimTargetRef = useRef<string | null>(null);
   const focusAnimGenRef = useRef(0);
@@ -108,6 +93,12 @@ export default function App() {
   useLayoutEffect(() => {
     focusAnimTargetRef.current = focusAnimTarget;
   }, [focusAnimTarget]);
+
+  /** When applied focus name changes, align camera with data origin (w=0); keep zoom and Shift+Möbius from sticking across unrelated focus changes. */
+  useLayoutEffect(() => {
+    if (!appliedFocus.trim()) return;
+    diskViewRef.current?.recenterPreservingZoom();
+  }, [appliedFocus]);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -124,6 +115,7 @@ export default function App() {
         ]);
         if (cancelled) return;
         setBundle(b);
+        setRunMeta(meta ?? null);
         const defF = meta?.default_focus?.trim() || b.vertex[0] || "";
         const defSeeds = (meta?.default_seeds?.join(" ") || defF).replace(/\s+/g, " ").trim();
         setSeedsDraft(defSeeds);
@@ -146,7 +138,7 @@ export default function App() {
     isFocusAnimatingRef.current = false;
     setFocusAnimTarget(null);
     z0AnimRef.current = null;
-  }, [appliedSeedsText, rimCullEps, bundle]);
+  }, [appliedSeedsText, rimCullEps, bundle, nonSeedShowMode]);
 
   useEffect(() => {
     return () => {
@@ -161,11 +153,11 @@ export default function App() {
       const z0 = z0FromProtein(bundle, appliedFocus);
       const seeds = parseSeeds(appliedSeedsText);
       if (seeds.size === 0) return null;
-      return computeScene(bundle, z0, seeds, rimCullEps);
+      return computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode);
     } catch {
       return null;
     }
-  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps]);
+  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode]);
 
   const pickerNames = useMemo(
     () => (bundle ? focusPickerNames(bundle, appliedSeedsText, appliedFocus) : []),
@@ -235,6 +227,9 @@ export default function App() {
       const gy = new Float32Array(Z0_GEODESIC_SAMPLES);
       fillZ0Geodesic(z0Start, z0End, Z0_GEODESIC_SAMPLES, gx, gy);
 
+      /* Pan/Möbius are camera-only; data focus puts the gene at w=0 — clear offsets so that stays centered. */
+      diskViewRef.current?.recenterPreservingZoom();
+
       isFocusAnimatingRef.current = true;
       setFocusAnimTarget(t);
 
@@ -249,7 +244,7 @@ export default function App() {
         z0AnimRef.current = z0;
         let buf: SceneBuffers | null = null;
         try {
-          buf = computeScene(bundle, z0, seeds, rimCullEps);
+          buf = computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode);
         } catch {
           focusAnimGenRef.current += 1;
           isFocusAnimatingRef.current = false;
@@ -270,8 +265,22 @@ export default function App() {
       };
       focusAnimRafRef.current = requestAnimationFrame(tick);
     },
-    [bundle, appliedSeedsText, rimCullEps, webGpuError],
+    [bundle, appliedSeedsText, rimCullEps, nonSeedShowMode, webGpuError],
   );
+
+  useLayoutEffect(() => {
+    if (!bundle || !degrees) {
+      nodeInteractionRef.current = null;
+      return;
+    }
+    nodeInteractionRef.current = {
+      tooltipForGraphIndex: (i: number) => nodeListTooltipForIndex(bundle, i, degrees, runMeta),
+      pickGraphIndex: (i: number) => {
+        if (i < 0 || i >= bundle.vertex.length) return;
+        onPickFocus(bundle.vertex[i]!);
+      },
+    };
+  }, [bundle, degrees, onPickFocus, runMeta]);
 
   const stats: SceneStats | null = scene?.stats ?? null;
   const focusUiKey = focusAnimTarget?.trim() || appliedFocus.trim();
@@ -290,14 +299,12 @@ export default function App() {
         nodeSizeMul={nodeSizeMul}
         compensateZoomNodes={compensateZoomNodes}
         nodeMinMul={nodeMinMul}
+        nodeInteractionRef={nodeInteractionRef}
       />
 
       <details className="advancedPanel">
         <summary>Advanced</summary>
         <div className="advancedInner">
-          <p className="advancedNavHint">
-            Canvas: wheel = zoom, drag = pan. Shift+drag = Möbius pan (hyperbolic).
-          </p>
           <label
             className="seedLabelsCb"
             title="When on, green/red node markers shrink partially with Euclidean zoom (50% of full inverse scale) so they grow less on screen. Off = world size unchanged when zooming."
@@ -348,6 +355,26 @@ export default function App() {
               onChange={(e) => setShowCrosshair(e.target.checked)}
             />
             <span>Show crosshair</span>
+          </label>
+          <label
+            className="advancedSelect"
+            title="Green disks: all non-seeds in view, none, or only vertices on a seed-touching edge. Red seeds and geodesics unchanged."
+          >
+            <span className="advancedSelectLabel">Show nodes</span>
+            <select
+              value={nonSeedShowMode}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "all" || v === "seed_only" || v === "seed_and_neighbors") {
+                  setNonSeedShowMode(v);
+                }
+              }}
+              aria-label="Show nodes"
+            >
+              <option value="all">All</option>
+              <option value="seed_only">Only seed</option>
+              <option value="seed_and_neighbors">Only seed and neighbors</option>
+            </select>
           </label>
           <label className="seedLabelsCb" title="Larger near disk center (after focus map); same rule for green and red nodes.">
             <input
@@ -448,7 +475,7 @@ export default function App() {
           {pickerNames.map((name) => {
             const idx = bundle?.nameToIndex.get(name);
             const deg = idx !== undefined && degrees ? degrees[idx] : null;
-            const tip = bundle ? nodeListTooltip(bundle, name, deg) : name;
+            const tip = bundle ? nodeListTooltip(bundle, name, deg, runMeta) : name;
             return (
               <li key={name}>
                 <button

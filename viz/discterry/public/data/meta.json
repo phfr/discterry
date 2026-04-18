@@ -1,6 +1,8 @@
 {
   "run_subdir": "d2",
-  "default_focus": "CATSPER1",
+  "n_vertices": 17090,
+  "n_edges": 298866,
+  "default_focus": "STAC3",
   "default_seeds": [
     "CATSPER1",
     "CYSRT1",
@@ -19,5 +21,13 @@
     "CACNG1",
     "CACNA1F",
     "CACNA2D1"
-  ]
+  ],
+  "mercator_nb_vertices_header": 17090,
+  "beta": 2.02898,
+  "mu": 0.000131833,
+  "dimension": 2,
+  "radius_s_d": 36.8779,
+  "radius_h_d1": 20.2358,
+  "kappa_min": 0.259196,
+  "inf_coord_path": "C:\\Users\\john\\Documents\\philipp\\hbol\\d-mercator-run\\d2\\edges_GC.inf_coord"
 }

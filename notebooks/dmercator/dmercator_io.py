@@ -1,6 +1,7 @@
 """IO helpers for D-Mercator PPI outputs under ``d-mercator-run/<run>/``."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -14,6 +15,29 @@ import pandas as pd
 def repo_root() -> Path:
     """Repository root (``hbol``): ``notebooks/dmercator`` → ``notebooks`` → root."""
     return Path(__file__).resolve().parent.parent.parent
+
+
+# ``viz/discterry`` defaults — keep in sync with ``02d_disk_focus_mobius.ipynb`` (``FOCUS_NODE`` / ``SEED_NODES``).
+DEFAULT_DISCTERRY_FOCUS = "STAC3"
+DEFAULT_DISCTERRY_SEEDS: tuple[str, ...] = (
+    "CATSPER1",
+    "CYSRT1",
+    "CATSPERD",
+    "CACNA1H",
+    "STAC3",
+    "CACNB3",
+    "CACNG6",
+    "CACNA1S",
+    "CATSPER4",
+    "CACNG8",
+    "CACNG2",
+    "CACNA1C",
+    "KRTAP1-3",
+    "NOTCH2NLA",
+    "CACNG1",
+    "CACNA1F",
+    "CACNA2D1",
+)
 
 
 def get_run_dir(subdir: Optional[str] = None) -> Path:
@@ -50,6 +74,15 @@ def _parse_coord_meta(raw: str) -> Dict[str, Any]:
     m = re.search(r"DIMENSION\s+(\d+)", raw)
     if m:
         meta["dimension"] = int(m.group(1))
+    m = re.search(r"radius_S\^D:\s*([0-9.eE+-]+)", raw)
+    if m:
+        meta["radius_s_d"] = float(m.group(1))
+    m = re.search(r"radius_H\^D\+1\s+([0-9.eE+-]+)", raw)
+    if m:
+        meta["radius_h_d1"] = float(m.group(1))
+    m = re.search(r"kappa_min:\s*([0-9.eE+-]+)", raw, re.IGNORECASE)
+    if m:
+        meta["kappa_min"] = float(m.group(1))
     return meta
 
 
@@ -161,3 +194,96 @@ def save_merged_parquet(df: pd.DataFrame, path: Path | str) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(p, index=False)
+
+
+def export_discterry_public_data(subdir: Optional[str] = None) -> Dict[str, Any]:
+    """Write ``viz/discterry/public/data/{nodes,edges}.parquet`` and ``meta.json``.
+
+    ``nodes.parquet`` includes disk chart ``x,y`` plus all per-vertex D-Mercator inference
+    columns from ``*.inf_coord`` (``inf_kappa``, ``inf_hyp_rad``, ``inf_pos_*``).
+    ``meta.json`` merges run defaults with header fields from the coord file (``beta``,
+    ``mu``, ``dimension``, radii, etc.).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    paths = paths_for_run(subdir)
+    coord_meta, df = parse_inf_coord(paths["inf_coord"])
+    g = load_edges_graph(paths["edge"])
+    x, y = ortho_xy_disk(df)
+
+    repo = repo_root()
+    out = repo / "viz" / "discterry" / "public" / "data"
+    out.mkdir(parents=True, exist_ok=True)
+
+    vertices = [str(v).strip() for v in df["Vertex"].tolist()]
+    name_to_i = {name: i for i, name in enumerate(vertices)}
+
+    kappa = df["Inf.Kappa"].to_numpy(dtype=np.float64).astype(np.float32)
+    hyp = df["Inf.Hyp.Rad"].to_numpy(dtype=np.float64).astype(np.float32)
+    p1 = df["Inf.Pos.1"].to_numpy(dtype=np.float64).astype(np.float32)
+    p2 = df["Inf.Pos.2"].to_numpy(dtype=np.float64).astype(np.float32)
+    p3 = df["Inf.Pos.3"].to_numpy(dtype=np.float64).astype(np.float32)
+
+    nodes_tbl = pa.table(
+        {
+            "vertex": pa.array(vertices, type=pa.string()),
+            "x": pa.array(np.asarray(x, dtype=np.float32), type=pa.float32()),
+            "y": pa.array(np.asarray(y, dtype=np.float32), type=pa.float32()),
+            "inf_kappa": pa.array(kappa, type=pa.float32()),
+            "inf_hyp_rad": pa.array(hyp, type=pa.float32()),
+            "inf_pos_1": pa.array(p1, type=pa.float32()),
+            "inf_pos_2": pa.array(p2, type=pa.float32()),
+            "inf_pos_3": pa.array(p3, type=pa.float32()),
+        }
+    )
+
+    src: list[int] = []
+    dst: list[int] = []
+    for u, v in g.edges():
+        uu, vv = str(u).strip(), str(v).strip()
+        if uu not in name_to_i or vv not in name_to_i:
+            continue
+        src.append(name_to_i[uu])
+        dst.append(name_to_i[vv])
+
+    edges_tbl = pa.table(
+        {
+            "src": pa.array(src, type=pa.int32()),
+            "dst": pa.array(dst, type=pa.int32()),
+        }
+    )
+
+    pq.write_table(nodes_tbl, out / "nodes.parquet")
+    pq.write_table(edges_tbl, out / "edges.parquet")
+
+    run_key = (subdir or os.environ.get("DMERCATOR_RUN", "d2")).strip()
+    focus = (
+        DEFAULT_DISCTERRY_FOCUS.strip()
+        if DEFAULT_DISCTERRY_FOCUS.strip() in name_to_i
+        else (vertices[0] if vertices else "")
+    )
+    default_seeds = [s.strip() for s in DEFAULT_DISCTERRY_SEEDS if s.strip() in name_to_i]
+    if not default_seeds and vertices:
+        default_seeds = [vertices[0]]
+
+    meta: Dict[str, Any] = {
+        "run_subdir": run_key,
+        "n_vertices": len(vertices),
+        "n_edges": len(src),
+        "default_focus": focus,
+        "default_seeds": default_seeds,
+    }
+    for k, v in coord_meta.items():
+        if k == "nb_vertices":
+            meta["mercator_nb_vertices_header"] = v
+        else:
+            meta[k] = v
+
+    with (out / "meta.json").open("w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    print("Wrote nodes:", out / "nodes.parquet", "n_vertices=", len(vertices))
+    print("Wrote edges:", out / "edges.parquet", "n_edges=", len(src))
+    print("Wrote meta:", out / "meta.json")
+    return meta

@@ -5,6 +5,23 @@
   background: #0e0e10;
 }
 
+.diskNodeTooltip {
+  position: fixed;
+  z-index: 30;
+  pointer-events: none;
+  max-width: 240px;
+  padding: 8px 10px;
+  font-size: 10px;
+  line-height: 1.35;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #e8e8ee;
+  background: rgba(20, 22, 32, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  white-space: pre-wrap;
+}
+
 .advancedPanel {
   position: fixed;
   top: 10px;
@@ -49,13 +66,6 @@
   margin-top: 8px;
   padding-top: 6px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.advancedNavHint {
-  margin: 0;
-  font-size: 10px;
-  line-height: 1.35;
-  color: #8e8e96;
 }
 
 .resetViewBtn {
@@ -126,6 +136,32 @@
   background: rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(6px);
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.45);
+}
+
+.advancedSelect {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #b4b4bc;
+}
+
+.advancedSelectLabel {
+  font-weight: 500;
+  color: #c8c8d0;
+}
+
+.advancedSelect select {
+  align-self: flex-start;
+  min-width: 11.5rem;
+  max-width: 100%;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(30, 30, 40, 0.95);
+  color: #e4e4ea;
+  cursor: pointer;
 }
 
 .seedLabelsCb {

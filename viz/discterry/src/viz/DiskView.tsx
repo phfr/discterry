@@ -23,7 +23,9 @@ import {
   CircleGeometry,
   Matrix4,
   Vector3,
+  Vector2,
   Quaternion,
+  Raycaster,
 } from "three/webgpu";
 import { LineSegments2 } from "three/addons/lines/webgpu/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
@@ -41,6 +43,10 @@ const ZOOM_MIN = 0.45;
 /** Max zoom-in (ortho half-extent = 1.06 / zoom); 16 = 2× previous cap of 8. */
 const ZOOM_MAX = 16;
 const WHEEL_ZOOM_SENS = 0.0018;
+/** Shift+wheel: radial display map w ↦ r^{γ-1} w (|w|=1 fixed; γ<1 spreads interior toward rim). */
+const RIM_WHEEL_SENS = 0.0014;
+const RIM_GAMMA_MIN = 0.38;
+const RIM_GAMMA_MAX = 2.4;
 /** When zoom node compensation is on: blend halfway from 1 to full 1/zoom (screen-stable radius). */
 const ZOOM_NODE_COMP_STRENGTH = 0.5;
 
@@ -50,16 +56,29 @@ export type DiskViewTransform = {
   panX: number;
   panY: number;
   mobius: Mobius2;
+  /**
+   * Radial-only viewer warp after Möbius: (x,y) ↦ r^{γ-1}(x,y), r = hypot(x,y). γ=1 off.
+   * |w|=1 fixed; γ<1 pushes interior toward rim (wide “FOV”); γ>1 toward center.
+   */
+  rimPreservingGamma: number;
 };
 
 export type DiskViewHandle = {
   resetView: () => void;
+  /** Clear Euclidean pan and viewer Möbius; keep zoom (call when data focus `z0` changes so w=0 stays centered). */
+  recenterPreservingZoom: () => void;
   /** Push GPU buffers without waiting for React `scene` prop (focus animation frames). */
   applySceneBuffers: (buf: SceneBuffers | null) => void;
 };
 
+/** Filled by App: map graph index → list tooltip text; pick sets focus by vertex index. */
+export type DiskViewNodeInteraction = {
+  tooltipForGraphIndex: (graphIndex: number) => string;
+  pickGraphIndex: (graphIndex: number) => void;
+};
+
 function defaultDiskViewTransform(): DiskViewTransform {
-  return { zoom: 1, panX: 0, panY: 0, mobius: identityMobius() };
+  return { zoom: 1, panX: 0, panY: 0, mobius: identityMobius(), rimPreservingGamma: 1 };
 }
 
 function updateOrthographicCamera(
@@ -81,12 +100,26 @@ function mapWxy(wre: number, wim: number, M: Mobius2): [number, number] {
   return [o.re, o.im];
 }
 
-function transformLinePositions(src: Float32Array, M: Mobius2): Float32Array {
-  if (isIdentityMobius(M)) return src;
+/** After Möbius: radial power map fixing the rim circle (r=1) pointwise. */
+function rimRadialExponent(wx: number, wy: number, gamma: number): [number, number] {
+  if (Math.abs(gamma - 1) < 1e-9) return [wx, wy];
+  const r = Math.hypot(wx, wy);
+  if (r < 1e-15) return [0, 0];
+  const s = Math.pow(r, gamma - 1);
+  return [wx * s, wy * s];
+}
+
+function mapViewerWxy(wre: number, wim: number, v: DiskViewTransform): [number, number] {
+  const [a, b] = mapWxy(wre, wim, v.mobius);
+  return rimRadialExponent(a, b, v.rimPreservingGamma);
+}
+
+function transformLinePositions(src: Float32Array, v: DiskViewTransform): Float32Array {
+  if (isIdentityMobius(v.mobius) && Math.abs(v.rimPreservingGamma - 1) < 1e-9) return src;
   const n = src.length;
   const out = new Float32Array(n);
   for (let i = 0; i < n; i += 3) {
-    const [x, y] = mapWxy(src[i], src[i + 1], M);
+    const [x, y] = mapViewerWxy(src[i], src[i + 1], v);
     out[i] = x;
     out[i + 1] = y;
     out[i + 2] = src[i + 2];
@@ -117,6 +150,7 @@ type Props = {
   nodeSizeMul: number;
   compensateZoomNodes: boolean;
   nodeMinMul: number;
+  nodeInteractionRef?: RefObject<DiskViewNodeInteraction | null>;
 };
 
 type ThreeCtx = {
@@ -134,7 +168,42 @@ type ThreeCtx = {
   crosshairH: InstanceType<typeof LineSegments>;
   crosshairV: InstanceType<typeof LineSegments>;
   raf: number;
+  nodeTipEl: HTMLDivElement;
+  raycaster: InstanceType<typeof Raycaster>;
+  ndcPointer: InstanceType<typeof Vector2>;
 };
+
+const CLICK_DRAG_PX = 6;
+
+function pickGraphIndexAtPointerEvent(
+  e: PointerEvent,
+  canvas: HTMLCanvasElement,
+  camera: InstanceType<typeof OrthographicCamera>,
+  buf: SceneBuffers | null,
+  ctx: ThreeCtx,
+  ndc: InstanceType<typeof Vector2>,
+  raycaster: InstanceType<typeof Raycaster>,
+): number | null {
+  if (!buf || (!ctx.meshOther && !ctx.meshSeeds)) return null;
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(1, rect.width);
+  const h = Math.max(1, rect.height);
+  ndc.x = ((e.clientX - rect.left) / w) * 2 - 1;
+  ndc.y = -((e.clientY - rect.top) / h) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const objs: InstanceType<typeof InstancedMesh>[] = [];
+  if (ctx.meshSeeds) objs.push(ctx.meshSeeds);
+  if (ctx.meshOther) objs.push(ctx.meshOther);
+  if (!objs.length) return null;
+  const hits = raycaster.intersectObjects(objs, false);
+  const hit = hits[0];
+  if (!hit || hit.instanceId === undefined) return null;
+  const mesh = hit.object as InstanceType<typeof InstancedMesh>;
+  const iid = hit.instanceId;
+  if (mesh === ctx.meshSeeds && iid >= 0 && iid < buf.seedGraphIndex.length) return buf.seedGraphIndex[iid]!;
+  if (mesh === ctx.meshOther && iid >= 0 && iid < buf.otherGraphIndex.length) return buf.otherGraphIndex[iid]!;
+  return null;
+}
 
 /** World-space radius under ortho ~±1.06; opaque filled disks on top of lines/points. */
 const SEED_DISK_RADIUS = 0.013;
@@ -215,21 +284,21 @@ function updateSeedLabelPositions(
 ) {
   const spans = ctx.labelSpans;
   if (!show || !buf || buf.nPointsSeed === 0 || spans.length !== buf.nPointsSeed) return;
-  const { camera, renderer, labelProj: v } = ctx;
+  const { camera, renderer, labelProj } = ctx;
   const canvas = renderer.domElement;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   if (w <= 0 || h <= 0) return;
   const p = buf.pointsSeed;
-  const M = viewRef.current.mobius;
+  const viewT = viewRef.current;
   const ox = 8;
   const oy = -7;
   for (let i = 0; i < spans.length; i++) {
-    const [x, y] = mapWxy(p[i * 3], p[i * 3 + 1], M);
-    v.set(x, y, p[i * 3 + 2]);
-    v.project(camera);
-    const sx = (v.x * 0.5 + 0.5) * w + ox;
-    const sy = (-v.y * 0.5 + 0.5) * h + oy;
+    const [x, y] = mapViewerWxy(p[i * 3], p[i * 3 + 1], viewT);
+    labelProj.set(x, y, p[i * 3 + 2]);
+    labelProj.project(camera);
+    const sx = (labelProj.x * 0.5 + 0.5) * w + ox;
+    const sy = (-labelProj.y * 0.5 + 0.5) * h + oy;
     spans[i].style.transform = `translate(${sx}px, ${sy}px)`;
   }
 }
@@ -249,8 +318,8 @@ function applyBuffers(
     compensateZoomNodes,
     nodeMinMul,
   } = sizingRef.current;
-  const M = viewRef.current.mobius;
-  const zoom = viewRef.current.zoom;
+  const v = viewRef.current;
+  const zoom = v.zoom;
   const invZoom = 1 / Math.max(zoom, ZOOM_MIN);
   const nodeZoomMul = nodeZoomMultiplier(invZoom, compensateZoomNodes);
   const zm = Math.max(nodeZoomMul, nodeMinMul);
@@ -265,7 +334,7 @@ function applyBuffers(
 
   /* Blue (additive) → green points → red both-seed lines → opaque seed disks on top. */
   if (buf.nLineOneVerts > 0) {
-    const linePos = transformLinePositions(buf.lineOnePositions, M);
+    const linePos = transformLinePositions(buf.lineOnePositions, v);
     const g = new BufferGeometry();
     g.setAttribute("position", new Float32BufferAttribute(linePos, 3));
     const m = new LineBasicMaterial({
@@ -293,7 +362,7 @@ function applyBuffers(
     });
     const mesh = new InstancedMesh(circleGeom, mat, buf.nPointsOther);
     for (let i = 0; i < buf.nPointsOther; i++) {
-      const [x, y] = mapWxy(po[i * 3], po[i * 3 + 1], M);
+      const [x, y] = mapViewerWxy(po[i * 3], po[i * 3 + 1], v);
       const z = po[i * 3 + 2];
       const s = weighted
         ? clampedRadialScale(Math.hypot(x, y), radialMin, radialMax, nodeMinMul)
@@ -309,7 +378,7 @@ function applyBuffers(
     scene3.add(mesh);
   }
   if (buf.nLineBothVerts > 0) {
-    const bothPos = transformLinePositions(buf.lineBothPositions, M);
+    const bothPos = transformLinePositions(buf.lineBothPositions, v);
     const geom = new LineSegmentsGeometry();
     geom.setPositions(bothPos);
     const mat = new Line2NodeMaterial({
@@ -337,7 +406,7 @@ function applyBuffers(
     const mesh = new InstancedMesh(circleGeom, mat, buf.nPointsSeed);
     const p = buf.pointsSeed;
     for (let i = 0; i < buf.nPointsSeed; i++) {
-      const [x, y] = mapWxy(p[i * 3], p[i * 3 + 1], M);
+      const [x, y] = mapViewerWxy(p[i * 3], p[i * 3 + 1], v);
       const z = p[i * 3 + 2];
       if (weighted) {
         const s = clampedRadialScale(Math.hypot(x, y), radialMin, radialMax, nodeMinMul);
@@ -369,6 +438,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     nodeSizeMul,
     compensateZoomNodes,
     nodeMinMul,
+    nodeInteractionRef,
   }: Props,
   ref,
 ) {
@@ -412,6 +482,17 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const c = ctxRef.current;
       if (c) {
         updateOrthographicCamera(c.camera, diskViewTransformRef.current);
+        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      }
+    },
+    recenterPreservingZoom() {
+      const tr = diskViewTransformRef.current;
+      tr.panX = 0;
+      tr.panY = 0;
+      tr.mobius = identityMobius();
+      const c = ctxRef.current;
+      if (c) {
+        updateOrthographicCamera(c.camera, tr);
         applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
       }
     },
@@ -461,6 +542,13 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     labelsLayer.className = "diskSeedLabels";
     labelsLayer.setAttribute("aria-hidden", "true");
 
+    const nodeTipEl = document.createElement("div");
+    nodeTipEl.className = "diskNodeTooltip";
+    nodeTipEl.style.display = "none";
+
+    const raycaster = new Raycaster();
+    const ndcPointer = new Vector2();
+
     const ctx: ThreeCtx = {
       renderer,
       scene3,
@@ -476,8 +564,29 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       crosshairH,
       crosshairV,
       raf: 0,
+      nodeTipEl,
+      raycaster,
+      ndcPointer,
     };
     ctxRef.current = ctx;
+
+    const hideNodeTip = () => {
+      nodeTipEl.style.display = "none";
+      nodeTipEl.textContent = "";
+    };
+    const showNodeTip = (e: PointerEvent, text: string) => {
+      if (!text) {
+        hideNodeTip();
+        return;
+      }
+      nodeTipEl.textContent = text;
+      nodeTipEl.style.display = "block";
+      const pad = 14;
+      const tw = 240;
+      const th = 100;
+      nodeTipEl.style.left = `${Math.min(e.clientX + pad, window.innerWidth - tw)}px`;
+      nodeTipEl.style.top = `${Math.min(e.clientY + pad, window.innerHeight - th)}px`;
+    };
 
     const resize = () => {
       const w = host.clientWidth;
@@ -489,6 +598,9 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     let dragActive = false;
     let lastPx = 0;
     let lastPy = 0;
+    let downPx = 0;
+    let downPy = 0;
+    let pointerDidDrag = false;
     /** `e.shiftKey` is unreliable on some browsers during `setPointerCapture`; track Shift explicitly. */
     let shiftHeld = false;
     const syncShiftFromEvent = (e: PointerEvent | KeyboardEvent) => {
@@ -511,49 +623,97 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const tr = diskViewTransformRef.current;
-      tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
-      updateOrthographicCamera(camera, tr);
-      applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      const shiftWheel =
+        shiftHeld ||
+        e.shiftKey ||
+        (typeof e.getModifierState === "function" && e.getModifierState("Shift"));
+      if (shiftWheel) {
+        tr.rimPreservingGamma = Math.min(
+          RIM_GAMMA_MAX,
+          Math.max(RIM_GAMMA_MIN, tr.rimPreservingGamma * Math.exp(-e.deltaY * RIM_WHEEL_SENS)),
+        );
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      } else {
+        tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
+        updateOrthographicCamera(camera, tr);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      }
     };
 
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       dragActive = true;
+      pointerDidDrag = false;
+      downPx = e.clientX;
+      downPy = e.clientY;
       syncShiftFromEvent(e);
       lastPx = e.clientX;
       lastPy = e.clientY;
+      hideNodeTip();
       (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (!dragActive) return;
       syncShiftFromEvent(e);
-      const dx = e.clientX - lastPx;
-      const dy = e.clientY - lastPy;
-      lastPx = e.clientX;
-      lastPy = e.clientY;
-      const tr = diskViewTransformRef.current;
       const canvas = renderer.domElement;
-      const cw = Math.max(1, canvas.clientWidth);
-      const ch = Math.max(1, canvas.clientHeight);
-      const worldSpan = (2 * BASE_HALF_EXTENT) / tr.zoom;
-      if (shiftHeld) {
-        tr.mobius = incrementMobiusFromDrag(tr.mobius, dx, dy, cw, ch);
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      const tr = diskViewTransformRef.current;
+      const buf = sceneRef.current;
+      if (dragActive) {
+        if (Math.hypot(e.clientX - downPx, e.clientY - downPy) > CLICK_DRAG_PX) pointerDidDrag = true;
+        const dx = e.clientX - lastPx;
+        const dy = e.clientY - lastPy;
+        lastPx = e.clientX;
+        lastPy = e.clientY;
+        const cw = Math.max(1, canvas.clientWidth);
+        const ch = Math.max(1, canvas.clientHeight);
+        const worldSpan = (2 * BASE_HALF_EXTENT) / tr.zoom;
+        if (shiftHeld) {
+          tr.mobius = incrementMobiusFromDrag(tr.mobius, dx, dy, cw, ch);
+          applyBuffers(ctx, buf, diskDisplayRef, diskViewTransformRef);
+        } else {
+          tr.panX -= (dx / cw) * worldSpan;
+          tr.panY += (dy / ch) * worldSpan;
+          updateOrthographicCamera(camera, tr);
+        }
       } else {
-        tr.panX -= (dx / cw) * worldSpan;
-        tr.panY += (dy / ch) * worldSpan;
-        updateOrthographicCamera(camera, tr);
+        const nip = nodeInteractionRef?.current;
+        if (!nip || !buf) {
+          hideNodeTip();
+          return;
+        }
+        const gid = pickGraphIndexAtPointerEvent(e, canvas, camera, buf, ctx, ndcPointer, raycaster);
+        if (gid === null) hideNodeTip();
+        else showNodeTip(e, nip.tooltipForGraphIndex(gid));
       }
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      dragActive = false;
+      const canvas = renderer.domElement;
+      const buf = sceneRef.current;
+      const wasDrag = pointerDidDrag;
       try {
         (e.currentTarget as HTMLCanvasElement).releasePointerCapture(e.pointerId);
       } catch {
         /* already released */
       }
+      dragActive = false;
+      if (!wasDrag) {
+        const nip = nodeInteractionRef?.current;
+        if (nip && buf) {
+          const gid = pickGraphIndexAtPointerEvent(e, canvas, camera, buf, ctx, ndcPointer, raycaster);
+          if (gid !== null) nip.pickGraphIndex(gid);
+        }
+      }
+      const nip = nodeInteractionRef?.current;
+      if (nip && buf) {
+        const gid = pickGraphIndexAtPointerEvent(e, canvas, camera, buf, ctx, ndcPointer, raycaster);
+        if (gid === null) hideNodeTip();
+        else showNodeTip(e, nip.tooltipForGraphIndex(gid));
+      } else hideNodeTip();
+    };
+
+    const onPointerLeave = () => {
+      hideNodeTip();
     };
 
     const loop = () => {
@@ -568,6 +728,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         if (disposed) return;
         host.appendChild(renderer.domElement);
         host.appendChild(labelsLayer);
+        host.appendChild(nodeTipEl);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         resize();
         const el = renderer.domElement;
@@ -579,6 +740,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         el.addEventListener("pointermove", onPointerMove);
         el.addEventListener("pointerup", onPointerUp);
         el.addEventListener("pointercancel", onPointerUp);
+        el.addEventListener("pointerleave", onPointerLeave);
         applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
         syncSeedLabelDom(ctx, sceneRef.current, showLabelsRef.current);
         loop();
@@ -596,6 +758,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       ro.disconnect();
       if (renderer.domElement.parentElement === host) host.removeChild(renderer.domElement);
       if (labelsLayer.parentElement === host) host.removeChild(labelsLayer);
+      if (nodeTipEl.parentElement === host) host.removeChild(nodeTipEl);
       window.removeEventListener("keydown", onWindowKeyDown);
       window.removeEventListener("keyup", onWindowKeyUp);
       window.removeEventListener("blur", onWindowBlur);
@@ -604,11 +767,13 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("pointercancel", onPointerUp);
+      renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
       applyBuffers(ctx, null, diskDisplayRef, diskViewTransformRef);
       syncSeedLabelDom(ctx, null, false);
       renderer.dispose();
       ctxRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- read nodeInteractionRef.current in handlers; stable ref object
   }, [webGpuError]);
 
   useEffect(() => {
