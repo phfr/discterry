@@ -6,6 +6,10 @@ import { computeScene, type SceneBuffers, type SceneStats } from "./model/comput
 import { z0FromProtein } from "./z0FromProtein";
 import { DiskView } from "./viz/DiskView";
 
+const DEFAULT_RADIAL_SCALE_MIN = 0.25;
+const DEFAULT_RADIAL_SCALE_MAX = 2;
+const DEFAULT_NODE_SIZE_MUL = 0.5;
+
 function parseSeeds(text: string): Set<string> {
   const s = new Set<string>();
   for (const part of text.split(/\s+/)) {
@@ -75,6 +79,9 @@ export default function App() {
   const [showSeedLabels, setShowSeedLabels] = useState(true);
   const [showCrosshair, setShowCrosshair] = useState(false);
   const [centerWeightedSizes, setCenterWeightedSizes] = useState(false);
+  const [radialScaleMin, setRadialScaleMin] = useState(DEFAULT_RADIAL_SCALE_MIN);
+  const [radialScaleMax, setRadialScaleMax] = useState(DEFAULT_RADIAL_SCALE_MAX);
+  const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -161,6 +168,9 @@ export default function App() {
         showSeedLabels={showSeedLabels}
         showCrosshair={showCrosshair}
         centerWeightedSizes={centerWeightedSizes}
+        radialScaleMin={radialScaleMin}
+        radialScaleMax={radialScaleMax}
+        nodeSizeMul={nodeSizeMul}
       />
 
       <details className="advancedPanel">
@@ -189,6 +199,61 @@ export default function App() {
               onChange={(e) => setCenterWeightedSizes(e.target.checked)}
             />
             <span>Size nodes by distance to center</span>
+          </label>
+          <label className="advancedSlider" title="Scales green point sprites and both disk radii (world units).">
+            <span className="advancedSliderLabel">Node size</span>
+            <input
+              type="range"
+              min={0.25}
+              max={2.5}
+              step={0.025}
+              value={nodeSizeMul}
+              onChange={(e) => setNodeSizeMul(Number(e.target.value))}
+              aria-valuetext={`node size ${nodeSizeMul.toFixed(2)}×`}
+            />
+            <span className="advancedSliderVal">{nodeSizeMul.toFixed(2)}×</span>
+          </label>
+          <label
+            className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
+            title="Scale factor at the rim (|W|≈1 in the plane); only used when distance sizing is on."
+          >
+            <span className="advancedSliderLabel">Rim scale</span>
+            <input
+              type="range"
+              min={0.05}
+              max={1.5}
+              step={0.01}
+              value={radialScaleMin}
+              disabled={!centerWeightedSizes}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setRadialScaleMin(v);
+                setRadialScaleMax((M) => Math.max(M, v));
+              }}
+              aria-valuetext={`rim scale ${radialScaleMin.toFixed(2)}`}
+            />
+            <span className="advancedSliderVal">{radialScaleMin.toFixed(2)}</span>
+          </label>
+          <label
+            className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
+            title="Scale factor at disk center; only used when distance sizing is on."
+          >
+            <span className="advancedSliderLabel">Center scale</span>
+            <input
+              type="range"
+              min={0.3}
+              max={2.5}
+              step={0.01}
+              value={radialScaleMax}
+              disabled={!centerWeightedSizes}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setRadialScaleMax(v);
+                setRadialScaleMin((m) => Math.min(m, v));
+              }}
+              aria-valuetext={`center scale ${radialScaleMax.toFixed(2)}`}
+            />
+            <span className="advancedSliderVal">{radialScaleMax.toFixed(2)}</span>
           </label>
         </div>
       </details>

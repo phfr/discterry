@@ -24,12 +24,23 @@ import { LineSegments2 } from "three/addons/lines/webgpu/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import type { SceneBuffers } from "../model/computeScene";
 
+/** Batched display params read inside `applyBuffers` (ref kept fresh for async WebGPU init). */
+export type DiskDisplaySizing = {
+  centerWeighted: boolean;
+  radialMin: number;
+  radialMax: number;
+  nodeSizeMul: number;
+};
+
 type Props = {
   scene: SceneBuffers | null;
   webGpuError: string | null;
   showSeedLabels: boolean;
   showCrosshair: boolean;
   centerWeightedSizes: boolean;
+  radialScaleMin: number;
+  radialScaleMax: number;
+  nodeSizeMul: number;
 };
 
 type ThreeCtx = {
@@ -57,17 +68,20 @@ const SEED_DISK_SEGMENTS = 40;
 const OTHER_DISK_RADIUS = 0.0062;
 const OTHER_DISK_SEGMENTS = 32;
 /** Scale factor from W-plane radius r = hypot(x,y): larger near center (r→0). */
-const RADIAL_SCALE_MIN = 0.32;
-const RADIAL_SCALE_MAX = 1.22;
-
 const _qId = new Quaternion();
 const _vPos = new Vector3();
 const _vScale = new Vector3();
 const _m4 = new Matrix4();
 
-function radialScaleFromR(r: number): number {
+function radialScaleFromR(r: number, sMin: number, sMax: number): number {
   const t = Math.min(1, Math.max(0, r));
-  return RADIAL_SCALE_MIN + (1 - t) * (RADIAL_SCALE_MAX - RADIAL_SCALE_MIN);
+  const lo = Math.min(sMin, sMax);
+  const hi = Math.max(sMin, sMax);
+  return lo + (1 - t) * (hi - lo);
+}
+
+function pointsSpriteSize(nodeMul: number): number {
+  return Math.min(48, Math.max(2, 10 * nodeMul));
 }
 
 function disposeLineMesh(m: InstanceType<typeof LineSegments> | null, scene3: InstanceType<typeof Scene>) {
@@ -132,9 +146,11 @@ function updateSeedLabelPositions(ctx: ThreeCtx, buf: SceneBuffers | null, show:
   }
 }
 
-function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef: RefObject<boolean>) {
+function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObject<DiskDisplaySizing>) {
   const { scene3 } = ctx;
-  const weighted = centerWeightedRef.current;
+  const { centerWeighted: weighted, radialMin, radialMax, nodeSizeMul } = sizingRef.current;
+  const otherR = OTHER_DISK_RADIUS * nodeSizeMul;
+  const seedR = SEED_DISK_RADIUS * nodeSizeMul;
   disposeLineBothWide(ctx.lineBoth, scene3);
   disposeLineMesh(ctx.lineOne, scene3);
   disposePoints(ctx.ptsOther, scene3);
@@ -162,7 +178,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef
   if (buf.nPointsOther > 0) {
     const po = buf.pointsOther;
     if (weighted) {
-      const circleGeom = new CircleGeometry(OTHER_DISK_RADIUS, OTHER_DISK_SEGMENTS);
+      const circleGeom = new CircleGeometry(otherR, OTHER_DISK_SEGMENTS);
       const mat = new MeshBasicMaterial({
         color: 0x55dd77,
         transparent: false,
@@ -175,7 +191,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef
         const x = po[i * 3];
         const y = po[i * 3 + 1];
         const z = po[i * 3 + 2];
-        const s = radialScaleFromR(Math.hypot(x, y));
+        const s = radialScaleFromR(Math.hypot(x, y), radialMin, radialMax);
         _vPos.set(x, y, z);
         _m4.compose(_vPos, _qId, _vScale.set(s, s, 1));
         mesh.setMatrixAt(i, _m4);
@@ -190,7 +206,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef
       g.setAttribute("position", new Float32BufferAttribute(po, 3));
       const m = new PointsMaterial({
         color: 0x55dd77,
-        size: 10,
+        size: pointsSpriteSize(nodeSizeMul),
         sizeAttenuation: false,
         depthTest: true,
         /* Avoid large sprites writing depth into neighbors' pixels (hides nearby seed points). */
@@ -218,7 +234,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef
     scene3.add(lineBoth);
   }
   if (buf.nPointsSeed > 0) {
-    const circleGeom = new CircleGeometry(SEED_DISK_RADIUS, SEED_DISK_SEGMENTS);
+    const circleGeom = new CircleGeometry(seedR, SEED_DISK_SEGMENTS);
     const mat = new MeshBasicMaterial({
       color: 0xff2a2a,
       transparent: false,
@@ -234,7 +250,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef
       const y = p[i * 3 + 1];
       const z = p[i * 3 + 2];
       if (weighted) {
-        const s = radialScaleFromR(Math.hypot(x, y));
+        const s = radialScaleFromR(Math.hypot(x, y), radialMin, radialMax);
         _vPos.set(x, y, z);
         _m4.compose(_vPos, _qId, _vScale.set(s, s, 1));
         mesh.setMatrixAt(i, _m4);
@@ -251,13 +267,27 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, centerWeightedRef
   }
 }
 
-export function DiskView({ scene, webGpuError, showSeedLabels, showCrosshair, centerWeightedSizes }: Props) {
+export function DiskView({
+  scene,
+  webGpuError,
+  showSeedLabels,
+  showCrosshair,
+  centerWeightedSizes,
+  radialScaleMin,
+  radialScaleMax,
+  nodeSizeMul,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<ThreeCtx | null>(null);
   const sceneRef = useRef(scene);
   const showLabelsRef = useRef(showSeedLabels);
   const showCrosshairRef = useRef(showCrosshair);
-  const centerWeightedSizesRef = useRef(centerWeightedSizes);
+  const diskDisplayRef = useRef<DiskDisplaySizing>({
+    centerWeighted: centerWeightedSizes,
+    radialMin: radialScaleMin,
+    radialMax: radialScaleMax,
+    nodeSizeMul,
+  });
   useLayoutEffect(() => {
     sceneRef.current = scene;
   }, [scene]);
@@ -268,8 +298,13 @@ export function DiskView({ scene, webGpuError, showSeedLabels, showCrosshair, ce
     showCrosshairRef.current = showCrosshair;
   }, [showCrosshair]);
   useLayoutEffect(() => {
-    centerWeightedSizesRef.current = centerWeightedSizes;
-  }, [centerWeightedSizes]);
+    diskDisplayRef.current = {
+      centerWeighted: centerWeightedSizes,
+      radialMin: radialScaleMin,
+      radialMax: radialScaleMax,
+      nodeSizeMul,
+    };
+  }, [centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -342,7 +377,7 @@ export function DiskView({ scene, webGpuError, showSeedLabels, showCrosshair, ce
         host.appendChild(labelsLayer);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         resize();
-        applyBuffers(ctx, sceneRef.current, centerWeightedSizesRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef);
         syncSeedLabelDom(ctx, sceneRef.current, showLabelsRef.current);
         loop();
       } catch (e) {
@@ -359,7 +394,7 @@ export function DiskView({ scene, webGpuError, showSeedLabels, showCrosshair, ce
       ro.disconnect();
       if (renderer.domElement.parentElement === host) host.removeChild(renderer.domElement);
       if (labelsLayer.parentElement === host) host.removeChild(labelsLayer);
-      applyBuffers(ctx, null, centerWeightedSizesRef);
+      applyBuffers(ctx, null, diskDisplayRef);
       syncSeedLabelDom(ctx, null, false);
       renderer.dispose();
       ctxRef.current = null;
@@ -369,9 +404,9 @@ export function DiskView({ scene, webGpuError, showSeedLabels, showCrosshair, ce
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
-    applyBuffers(ctx, scene, centerWeightedSizesRef);
+    applyBuffers(ctx, scene, diskDisplayRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
-  }, [scene, showSeedLabels, centerWeightedSizes, webGpuError]);
+  }, [scene, showSeedLabels, centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul, webGpuError]);
 
   useEffect(() => {
     const ctx = ctxRef.current;
