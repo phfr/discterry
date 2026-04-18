@@ -47,7 +47,7 @@ The header also records **`beta`**, **`mu`**, and model radii (`radius_S^D`, `ra
 
 Module: `notebooks/dmercator/dmercator_io.py`.
 
-1. **`parse_inf_coord`** reads the file, extracts **`meta`** (regex on comments: `nb_vertices`, `beta`, `mu`, `dimension`), and builds a **`DataFrame`** with the vertex table above.
+1. **`parse_inf_coord`** reads the file, extracts **`meta`** (regex on comments: `nb_vertices`, `beta`, `mu`, `dimension` when present), and builds a **`DataFrame`** whose **`Inf.Pos.*` column count matches the header** (three positions for typical \(D=2\) runs, four for \(D=3\), etc.).
 
 2. **`normalize_pos(df)`** takes `Inf.Pos.1..3`, stacks them as an \(N\times 3\) matrix, **L2-normalizes each row** to unit length. Each vertex is now a point **\(\hat{\mathbf{s}} \in S^2\)** (unit sphere in similarity space).
 
@@ -83,6 +83,10 @@ Module: `notebooks/dmercator/dmercator_io.py`.
 
 **What the frontend never sees from this step:** `Inf.Kappa`, `Inf.Hyp.Rad`, and the third normalized component \(\hat{s}_3\) (it is fixed by \(x,y\) on the sphere only up to sign ambiguity—in practice the inferred vector determines the sign). If you need \(\kappa\) or native radius in the browser, extend the Parquet schema and loader accordingly.
 
+**3D web bundle (`public/data3d/`):** `dmercator_io.export_discterry_public_data_3d("d3")` reads **`d-mercator-run/d3/edges_GC.inf_coord`**, which has **four** `Inf.Pos.*` columns (native \(D=3\)). It writes **`nodes.parquet`** with `vertex`, display **`x,y,z`** (Tier‑A chart below), optional passthrough **`inf_kappa`**, **`inf_hyp_rad`**, **`inf_pos_1..4`**, plus **`edges.parquet`** and **`meta.json`**. This folder is loaded only when the Discterry URL includes the hash **`#3d`**; the default **`public/data/`** 2D export is unchanged.
+
+**Tier‑A ball chart (export, not the paper’s native hyperboloid→ball map):** each row’s `Inf.Pos.1…4` is **L2‑normalized to \(S^3\)**, then **stereographically projected** from the pole \((0,0,0,1)\) into \(\mathbb{R}^3\); the radial coordinate is **`0.92·tanh(Inf.Hyp.Rad / σ)`** with \(\sigma =\) header `radius_h_d1` when present else the median hyperbolic radius. Geodesics drawn in the **`#3d`** viewer are **true Poincaré‑ball geodesics** in these display coordinates (self‑consistent navigation); they are **not** guaranteed to match native D‑Mercator hyperbolic distances until a Tier‑B native chart is implemented.
+
 ---
 
 ## 5. Discterry frontend: load → scene → GPU
@@ -92,6 +96,10 @@ Code lives under `viz/discterry/` (see also `viz/discterry/CONCEPT.md` for a vie
 ### 5.1 Load (`src/data/loadBundle.ts`)
 
 Fetches **`nodes.parquet`**, **`edges.parquet`**, optional **`meta.json`**. Builds **`GraphBundle`**: parallel `Float32Array` for `x`, `y`, edge `src`/`dst`, `nameToIndex`, and `vertex[]` names.
+
+### 5.1b 3D mode (`#3d`, `src/data/loadBundle3d.ts`, `src/viz/BallView3d.tsx`)
+
+When `location.hash === "#3d"`, the app loads **`public/data3d/{nodes,edges}.parquet`** and **`meta.json`** into a **`GraphBundle3d`** (`x,y,z` plus optional inference columns). **`computeScene3d`** applies a **ball Möbius map** sending the focus protein to the origin (`src/math/poincareBall.ts`), then builds **geodesic polylines** in \(\mathbb{B}^3\) the same way seed-touching edges are classified in 2D. Analysis / path floaters are omitted in the first iteration of 3D mode.
 
 ### 5.2 Focus: Möbius recentering (`src/z0FromProtein.ts`, `src/math/mobius.ts`)
 
