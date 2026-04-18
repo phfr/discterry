@@ -87,7 +87,7 @@ export default function App() {
   const [rimCullEps, setRimCullEps] = useState(RIM_CULL_EPS);
   const [showSeedLabels, setShowSeedLabels] = useState(true);
   const [showCrosshair, setShowCrosshair] = useState(false);
-  const [centerWeightedSizes, setCenterWeightedSizes] = useState(false);
+  const [centerWeightedSizes, setCenterWeightedSizes] = useState(true);
   const [radialScaleMin, setRadialScaleMin] = useState(DEFAULT_RADIAL_SCALE_MIN);
   const [radialScaleMax, setRadialScaleMax] = useState(DEFAULT_RADIAL_SCALE_MAX);
   const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
@@ -237,7 +237,6 @@ export default function App() {
 
       isFocusAnimatingRef.current = true;
       setFocusAnimTarget(t);
-      diskViewRef.current?.resetView();
 
       const FOCUS_MS = 1000;
       const t0 = performance.now();

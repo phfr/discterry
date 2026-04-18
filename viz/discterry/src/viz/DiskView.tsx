@@ -16,8 +16,6 @@ import {
   Float32BufferAttribute,
   LineBasicMaterial,
   Line2NodeMaterial,
-  Points,
-  PointsMaterial,
   Color,
   AdditiveBlending,
   InstancedMesh,
@@ -128,7 +126,6 @@ type ThreeCtx = {
   host: HTMLDivElement;
   lineBoth: InstanceType<typeof Mesh> | null;
   lineOne: InstanceType<typeof LineSegments> | null;
-  ptsOther: InstanceType<typeof Points> | null;
   meshOther: InstanceType<typeof InstancedMesh> | null;
   meshSeeds: InstanceType<typeof InstancedMesh> | null;
   labelsLayer: HTMLDivElement;
@@ -163,13 +160,6 @@ function nodeZoomMultiplier(invZoom: number, compensate: boolean): number {
   return 1 + (invZoom - 1) * ZOOM_NODE_COMP_STRENGTH;
 }
 
-/** Green Points use pixels; scale ~with ortho zoom so behavior matches world-space red disks. */
-function pointsSpriteSize(nodeMul: number, zm: number, zoom: number): number {
-  const z = Math.max(zoom, ZOOM_MIN);
-  const raw = 10 * nodeMul * z * zm;
-  return Math.min(56, Math.max(2, raw));
-}
-
 function clampedRadialScale(
   r: number,
   radialMin: number,
@@ -194,13 +184,6 @@ function disposeLineBothWide(m: InstanceType<typeof Mesh> | null, scene3: Instan
   scene3.remove(m);
   m.geometry.dispose();
   (m.material as InstanceType<typeof Line2NodeMaterial>).dispose();
-}
-
-function disposePoints(m: InstanceType<typeof Points> | null, scene3: InstanceType<typeof Scene>) {
-  if (!m) return;
-  scene3.remove(m);
-  m.geometry.dispose();
-  (m.material as InstanceType<typeof PointsMaterial>).dispose();
 }
 
 function disposeInstancedMesh(m: InstanceType<typeof InstancedMesh> | null, scene3: InstanceType<typeof Scene>) {
@@ -275,10 +258,9 @@ function applyBuffers(
   const seedR = SEED_DISK_RADIUS * nodeSizeMul * zm;
   disposeLineBothWide(ctx.lineBoth, scene3);
   disposeLineMesh(ctx.lineOne, scene3);
-  disposePoints(ctx.ptsOther, scene3);
   disposeInstancedMesh(ctx.meshOther, scene3);
   disposeInstancedMesh(ctx.meshSeeds, scene3);
-  ctx.lineBoth = ctx.lineOne = ctx.ptsOther = ctx.meshOther = ctx.meshSeeds = null;
+  ctx.lineBoth = ctx.lineOne = ctx.meshOther = ctx.meshSeeds = null;
   if (!buf) return;
 
   /* Blue (additive) → green points → red both-seed lines → opaque seed disks on top. */
@@ -300,56 +282,31 @@ function applyBuffers(
   }
   if (buf.nPointsOther > 0) {
     const po = buf.pointsOther;
-    if (weighted) {
-      const circleGeom = new CircleGeometry(otherR, OTHER_DISK_SEGMENTS);
-      const mat = new MeshBasicMaterial({
-        color: 0x55dd77,
-        transparent: false,
-        depthTest: true,
-        depthWrite: false,
-        toneMapped: false,
-      });
-      const mesh = new InstancedMesh(circleGeom, mat, buf.nPointsOther);
-      for (let i = 0; i < buf.nPointsOther; i++) {
-        const [x, y] = mapWxy(po[i * 3], po[i * 3 + 1], M);
-        const z = po[i * 3 + 2];
-        const s = clampedRadialScale(Math.hypot(x, y), radialMin, radialMax, nodeMinMul);
-        _vPos.set(x, y, z);
-        _m4.compose(_vPos, _qId, _vScale.set(s, s, 1));
-        mesh.setMatrixAt(i, _m4);
-      }
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.renderOrder = 5;
-      mesh.frustumCulled = false;
-      ctx.meshOther = mesh;
-      scene3.add(mesh);
-    } else {
-      const g = new BufferGeometry();
-      if (isIdentityMobius(M)) {
-        g.setAttribute("position", new Float32BufferAttribute(po, 3));
-      } else {
-        const tf = new Float32Array(po.length);
-        for (let i = 0; i < po.length; i += 3) {
-          const [x, y] = mapWxy(po[i], po[i + 1], M);
-          tf[i] = x;
-          tf[i + 1] = y;
-          tf[i + 2] = po[i + 2];
-        }
-        g.setAttribute("position", new Float32BufferAttribute(tf, 3));
-      }
-      const m = new PointsMaterial({
-        color: 0x55dd77,
-        size: pointsSpriteSize(nodeSizeMul, zm, zoom),
-        sizeAttenuation: false,
-        depthTest: true,
-        /* Avoid large sprites writing depth into neighbors' pixels (hides nearby seed points). */
-        depthWrite: false,
-      });
-      const pts = new Points(g, m);
-      pts.renderOrder = 5;
-      ctx.ptsOther = pts;
-      scene3.add(pts);
+    /* Always world-space disks (like red seeds) so Euclidean zoom scales them; old Points path capped ~56px. */
+    const circleGeom = new CircleGeometry(otherR, OTHER_DISK_SEGMENTS);
+    const mat = new MeshBasicMaterial({
+      color: 0x55dd77,
+      transparent: false,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const mesh = new InstancedMesh(circleGeom, mat, buf.nPointsOther);
+    for (let i = 0; i < buf.nPointsOther; i++) {
+      const [x, y] = mapWxy(po[i * 3], po[i * 3 + 1], M);
+      const z = po[i * 3 + 2];
+      const s = weighted
+        ? clampedRadialScale(Math.hypot(x, y), radialMin, radialMax, nodeMinMul)
+        : 1;
+      _vPos.set(x, y, z);
+      _m4.compose(_vPos, _qId, _vScale.set(s, s, 1));
+      mesh.setMatrixAt(i, _m4);
     }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.renderOrder = 5;
+    mesh.frustumCulled = false;
+    ctx.meshOther = mesh;
+    scene3.add(mesh);
   }
   if (buf.nLineBothVerts > 0) {
     const bothPos = transformLinePositions(buf.lineBothPositions, M);
@@ -418,7 +375,6 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<ThreeCtx | null>(null);
   const diskViewTransformRef = useRef<DiskViewTransform>(defaultDiskViewTransform());
-  const prevSceneRef = useRef<SceneBuffers | null>(null);
   const sceneRef = useRef(scene);
   const showLabelsRef = useRef(showSeedLabels);
   const showCrosshairRef = useRef(showCrosshair);
@@ -512,7 +468,6 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       host,
       lineBoth: null,
       lineOne: null,
-      ptsOther: null,
       meshOther: null,
       meshSeeds: null,
       labelsLayer,
@@ -558,7 +513,6 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const tr = diskViewTransformRef.current;
       tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
       updateOrthographicCamera(camera, tr);
-      /* Points sprite size scales with zoom; instanced radii when zoom-comp is on — keep buffers in sync. */
       applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
     };
 
@@ -660,11 +614,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
-    if (prevSceneRef.current !== scene) {
-      prevSceneRef.current = scene;
-      diskViewTransformRef.current = defaultDiskViewTransform();
-      updateOrthographicCamera(ctx.camera, diskViewTransformRef.current);
-    }
+    /* Keep Euclidean pan/zoom and viewer Möbius across focus/scene buffer updates; use Reset view to clear. */
     applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
   }, [
