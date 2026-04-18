@@ -1,11 +1,23 @@
 {
   "run_subdir": "d2",
-  "default_focus": "STAC3",
+  "default_focus": "CATSPER1",
   "default_seeds": [
     "CATSPER1",
+    "CYSRT1",
+    "CATSPERD",
+    "CACNA1H",
     "STAC3",
     "CACNB3",
+    "CACNG6",
+    "CACNA1S",
+    "CATSPER4",
+    "CACNG8",
+    "CACNG2",
     "CACNA1C",
-    "CACNA1S"
+    "KRTAP1-3",
+    "NOTCH2NLA",
+    "CACNG1",
+    "CACNA1F",
+    "CACNA2D1"
   ]
 }

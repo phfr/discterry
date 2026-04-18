@@ -8,7 +8,7 @@ export const GEODESIC_N = 96;
 export const EDGE_Z_BOUND = 0.999;
 
 /** Default rim margin: hide nodes with |W| > 1 - RIM_CULL_EPS after Möbius (display-only). */
-export const RIM_CULL_EPS = 0.008;
+export const RIM_CULL_EPS = 0;
 
 /** Upper bound for the rim-cull slider in the UI (larger = more aggressive hiding). */
 export const RIM_CULL_EPS_SLIDER_MAX = 0.04;

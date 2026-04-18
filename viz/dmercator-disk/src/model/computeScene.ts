@@ -28,6 +28,8 @@ export type SceneBuffers = {
   lineBothPositions: Float32Array;
   pointsOther: Float32Array;
   pointsSeed: Float32Array;
+  /** Same length as `nPointsSeed`, order matches `pointsSeed` triples. */
+  seedLabels: string[];
   nLineOneVerts: number;
   nLineBothVerts: number;
   nPointsOther: number;
@@ -101,6 +103,7 @@ export function computeScene(
 
   const otherPts: number[] = [];
   const seedPts: number[] = [];
+  const seedLabels: string[] = [];
   let hiddenNonSeed = 0;
   let sparedSeed = 0;
   let sparedEdge = 0;
@@ -118,7 +121,9 @@ export function computeScene(
     if (!show) continue;
 
     if (isSeed[i]) {
-      seedPts.push(wx[i], wy[i], 0);
+      /* Slight +Z so seeds sit in front of coplanar green sprites at the same (x,y). */
+      seedPts.push(wx[i], wy[i], 0.004);
+      seedLabels.push(bundle.vertex[i]);
     } else {
       otherPts.push(wx[i], wy[i], 0);
     }
@@ -152,6 +157,7 @@ export function computeScene(
     lineOnePositions: lineOnePositions.subarray(0, oo.i),
     pointsOther: Float32Array.from(otherPts),
     pointsSeed: Float32Array.from(seedPts),
+    seedLabels,
     nLineBothVerts: ob.i,
     nLineOneVerts: oo.i,
     nPointsOther: otherPts.length / 3,

@@ -19,6 +19,17 @@ function webGpuSupported(): boolean {
   return typeof navigator !== "undefined" && !!navigator.gpu;
 }
 
+function vertexDegrees(bundle: GraphBundle): Int32Array {
+  const n = bundle.vertex.length;
+  const d = new Int32Array(n);
+  const { src, dst } = bundle;
+  for (let ei = 0; ei < src.length; ei++) {
+    d[src[ei]]++;
+    d[dst[ei]]++;
+  }
+  return d;
+}
+
 /** Sorted clickable names: valid applied seeds, plus current focus if in bundle but not listed. */
 function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, appliedFocus: string): string[] {
   const seeds = [...parseSeeds(appliedSeedsText)].filter((n) => bundle.nameToIndex.has(n));
@@ -37,6 +48,8 @@ export default function App() {
   const [appliedSeedsText, setAppliedSeedsText] = useState("");
   const [formErr, setFormErr] = useState<string | null>(null);
   const [rimCullEps, setRimCullEps] = useState(RIM_CULL_EPS);
+  const [showSeedLabels, setShowSeedLabels] = useState(true);
+  const [showCrosshair, setShowCrosshair] = useState(true);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -85,6 +98,8 @@ export default function App() {
     [bundle, appliedSeedsText, appliedFocus],
   );
 
+  const degrees = useMemo(() => (bundle ? vertexDegrees(bundle) : null), [bundle]);
+
   const onApplySeeds = useCallback(() => {
     setFormErr(null);
     if (!bundle) return;
@@ -115,12 +130,17 @@ export default function App() {
 
   return (
     <div className="shell">
-      <DiskView scene={scene} webGpuError={webGpuError} />
+      <DiskView
+        scene={scene}
+        webGpuError={webGpuError}
+        showSeedLabels={showSeedLabels}
+        showCrosshair={showCrosshair}
+      />
 
       <div className="floatPanel">
         {loadErr ? <div className="errLine">{loadErr}</div> : null}
         <label className="rimSlider">
-          <span className="rimSliderLabel">rim</span>
+          <span className="rimSliderLabel">rimcull</span>
           <input
             type="range"
             min={0}
@@ -128,9 +148,25 @@ export default function App() {
             step={0.0005}
             value={Math.min(rimCullEps, RIM_CULL_EPS_SLIDER_MAX)}
             onChange={(e) => setRimCullEps(Number(e.target.value))}
-            aria-valuetext={`rim margin ${rimCullEps.toFixed(4)}`}
+            aria-valuetext={`rimcull ${rimCullEps.toFixed(4)}`}
           />
           <span className="rimSliderVal">{rimCullEps.toFixed(4)}</span>
+        </label>
+        <label className="seedLabelsCb">
+          <input
+            type="checkbox"
+            checked={showSeedLabels}
+            onChange={(e) => setShowSeedLabels(e.target.checked)}
+          />
+          <span>Show seed labels</span>
+        </label>
+        <label className="seedLabelsCb">
+          <input
+            type="checkbox"
+            checked={showCrosshair}
+            onChange={(e) => setShowCrosshair(e.target.checked)}
+          />
+          <span>Show crosshair</span>
         </label>
         <textarea
           className="seedsTa"
@@ -144,17 +180,26 @@ export default function App() {
         </button>
         {formErr ? <div className="errLine">{formErr}</div> : null}
         <ul className="nameList" aria-label="Focus">
-          {pickerNames.map((name) => (
-            <li key={name}>
-              <button
-                type="button"
-                className={name === appliedFocus.trim() ? "nameBtn nameBtnOn" : "nameBtn"}
-                onClick={() => onPickFocus(name)}
-              >
-                {name}
-              </button>
-            </li>
-          ))}
+          {pickerNames.map((name) => {
+            const idx = bundle?.nameToIndex.get(name);
+            const deg = idx !== undefined && degrees ? degrees[idx] : null;
+            return (
+              <li key={name}>
+                <button
+                  type="button"
+                  className={name === appliedFocus.trim() ? "nameBtn nameBtnOn" : "nameBtn"}
+                  onClick={() => onPickFocus(name)}
+                >
+                  <span className="nameBtnLabel">{name}</span>
+                  {deg !== null ? (
+                    <span className="nameDeg" title="Graph degree (undirected)">
+                      {deg}
+                    </span>
+                  ) : null}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </div>
 

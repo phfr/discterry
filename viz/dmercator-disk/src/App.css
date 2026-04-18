@@ -49,10 +49,46 @@
   color: #c8c8d0;
 }
 
+.seedLabelsCb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #b4b4bc;
+  cursor: pointer;
+  user-select: none;
+}
+
+.seedLabelsCb input {
+  accent-color: #7c9cff;
+  cursor: pointer;
+}
+
+.diskSeedLabels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  overflow: visible;
+}
+
+.seedLabel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font: 11px/1.2 system-ui, sans-serif;
+  color: #f2ecec;
+  text-shadow:
+    0 0 3px #000,
+    0 0 6px #000,
+    0 1px 2px #000;
+  white-space: nowrap;
+}
+
 .seedsTa {
   width: 100%;
-  min-height: 72px;
-  max-height: 28vh;
+  min-height: 100px;
+  max-height: 34vh;
   margin: 0;
   padding: 6px 8px;
   font: 11px/1.35 ui-monospace, monospace;
@@ -105,7 +141,10 @@
 }
 
 .nameBtn {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   width: 100%;
   text-align: left;
   padding: 4px 6px;
@@ -118,6 +157,23 @@
   cursor: pointer;
 }
 
+.nameBtnLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nameDeg {
+  flex: 0 0 auto;
+  min-width: 2.25rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: #7e7e88;
+}
+
 .nameBtn:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
@@ -126,6 +182,10 @@
 .nameBtnOn {
   color: #fff;
   background: rgba(120, 160, 255, 0.25);
+}
+
+.nameBtnOn .nameDeg {
+  color: #b8b8c4;
 }
 
 .nameBtnOn:hover {
