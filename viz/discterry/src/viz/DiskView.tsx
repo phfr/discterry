@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  type RefObject,
+} from "react";
 import {
   WebGPURenderer,
   Scene,
@@ -23,6 +30,66 @@ import {
 import { LineSegments2 } from "three/addons/lines/webgpu/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import type { SceneBuffers } from "../model/computeScene";
+import {
+  applyMobiusToW,
+  identityMobius,
+  incrementMobiusFromDrag,
+  isIdentityMobius,
+  type Mobius2,
+} from "../math/viewerMobius";
+
+const BASE_HALF_EXTENT = 1.06;
+const ZOOM_MIN = 0.45;
+const ZOOM_MAX = 8;
+const WHEEL_ZOOM_SENS = 0.0018;
+
+export type DiskViewTransform = {
+  /** 1 = default framing; larger zooms in (smaller ortho half-extent). */
+  zoom: number;
+  panX: number;
+  panY: number;
+  mobius: Mobius2;
+};
+
+export type DiskViewHandle = {
+  resetView: () => void;
+};
+
+function defaultDiskViewTransform(): DiskViewTransform {
+  return { zoom: 1, panX: 0, panY: 0, mobius: identityMobius() };
+}
+
+function updateOrthographicCamera(
+  camera: InstanceType<typeof OrthographicCamera>,
+  v: DiskViewTransform,
+): void {
+  const half = BASE_HALF_EXTENT / v.zoom;
+  camera.left = v.panX - half;
+  camera.right = v.panX + half;
+  camera.top = v.panY + half;
+  camera.bottom = v.panY - half;
+  camera.updateProjectionMatrix();
+}
+
+/** Map (wx, wy) through viewer Möbius when non-identity. */
+function mapWxy(wre: number, wim: number, M: Mobius2): [number, number] {
+  if (isIdentityMobius(M)) return [wre, wim];
+  const o = applyMobiusToW(wre, wim, M);
+  return [o.re, o.im];
+}
+
+function transformLinePositions(src: Float32Array, M: Mobius2): Float32Array {
+  if (isIdentityMobius(M)) return src;
+  const n = src.length;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i += 3) {
+    const [x, y] = mapWxy(src[i], src[i + 1], M);
+    out[i] = x;
+    out[i + 1] = y;
+    out[i + 2] = src[i + 2];
+  }
+  return out;
+}
 
 /** Batched display params read inside `applyBuffers` (ref kept fresh for async WebGPU init). */
 export type DiskDisplaySizing = {
@@ -126,7 +193,12 @@ function syncSeedLabelDom(ctx: ThreeCtx, buf: SceneBuffers | null, show: boolean
   }
 }
 
-function updateSeedLabelPositions(ctx: ThreeCtx, buf: SceneBuffers | null, show: boolean) {
+function updateSeedLabelPositions(
+  ctx: ThreeCtx,
+  buf: SceneBuffers | null,
+  show: boolean,
+  viewRef: RefObject<DiskViewTransform>,
+) {
   const spans = ctx.labelSpans;
   if (!show || !buf || buf.nPointsSeed === 0 || spans.length !== buf.nPointsSeed) return;
   const { camera, renderer, labelProj: v } = ctx;
@@ -135,20 +207,28 @@ function updateSeedLabelPositions(ctx: ThreeCtx, buf: SceneBuffers | null, show:
   const h = canvas.clientHeight;
   if (w <= 0 || h <= 0) return;
   const p = buf.pointsSeed;
+  const M = viewRef.current.mobius;
   const ox = 8;
   const oy = -7;
   for (let i = 0; i < spans.length; i++) {
-    v.set(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+    const [x, y] = mapWxy(p[i * 3], p[i * 3 + 1], M);
+    v.set(x, y, p[i * 3 + 2]);
     v.project(camera);
-    const x = (v.x * 0.5 + 0.5) * w + ox;
-    const y = (-v.y * 0.5 + 0.5) * h + oy;
-    spans[i].style.transform = `translate(${x}px, ${y}px)`;
+    const sx = (v.x * 0.5 + 0.5) * w + ox;
+    const sy = (-v.y * 0.5 + 0.5) * h + oy;
+    spans[i].style.transform = `translate(${sx}px, ${sy}px)`;
   }
 }
 
-function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObject<DiskDisplaySizing>) {
+function applyBuffers(
+  ctx: ThreeCtx,
+  buf: SceneBuffers | null,
+  sizingRef: RefObject<DiskDisplaySizing>,
+  viewRef: RefObject<DiskViewTransform>,
+) {
   const { scene3 } = ctx;
   const { centerWeighted: weighted, radialMin, radialMax, nodeSizeMul } = sizingRef.current;
+  const M = viewRef.current.mobius;
   const otherR = OTHER_DISK_RADIUS * nodeSizeMul;
   const seedR = SEED_DISK_RADIUS * nodeSizeMul;
   disposeLineBothWide(ctx.lineBoth, scene3);
@@ -161,8 +241,9 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObj
 
   /* Blue (additive) → green points → red both-seed lines → opaque seed disks on top. */
   if (buf.nLineOneVerts > 0) {
+    const linePos = transformLinePositions(buf.lineOnePositions, M);
     const g = new BufferGeometry();
-    g.setAttribute("position", new Float32BufferAttribute(buf.lineOnePositions, 3));
+    g.setAttribute("position", new Float32BufferAttribute(linePos, 3));
     const m = new LineBasicMaterial({
       color: 0x6699ff,
       transparent: true,
@@ -188,8 +269,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObj
       });
       const mesh = new InstancedMesh(circleGeom, mat, buf.nPointsOther);
       for (let i = 0; i < buf.nPointsOther; i++) {
-        const x = po[i * 3];
-        const y = po[i * 3 + 1];
+        const [x, y] = mapWxy(po[i * 3], po[i * 3 + 1], M);
         const z = po[i * 3 + 2];
         const s = radialScaleFromR(Math.hypot(x, y), radialMin, radialMax);
         _vPos.set(x, y, z);
@@ -203,7 +283,18 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObj
       scene3.add(mesh);
     } else {
       const g = new BufferGeometry();
-      g.setAttribute("position", new Float32BufferAttribute(po, 3));
+      if (isIdentityMobius(M)) {
+        g.setAttribute("position", new Float32BufferAttribute(po, 3));
+      } else {
+        const tf = new Float32Array(po.length);
+        for (let i = 0; i < po.length; i += 3) {
+          const [x, y] = mapWxy(po[i], po[i + 1], M);
+          tf[i] = x;
+          tf[i + 1] = y;
+          tf[i + 2] = po[i + 2];
+        }
+        g.setAttribute("position", new Float32BufferAttribute(tf, 3));
+      }
       const m = new PointsMaterial({
         color: 0x55dd77,
         size: pointsSpriteSize(nodeSizeMul),
@@ -219,8 +310,9 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObj
     }
   }
   if (buf.nLineBothVerts > 0) {
+    const bothPos = transformLinePositions(buf.lineBothPositions, M);
     const geom = new LineSegmentsGeometry();
-    geom.setPositions(buf.lineBothPositions);
+    geom.setPositions(bothPos);
     const mat = new Line2NodeMaterial({
       color: 0xff2222,
       linewidth: 4,
@@ -246,8 +338,7 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObj
     const mesh = new InstancedMesh(circleGeom, mat, buf.nPointsSeed);
     const p = buf.pointsSeed;
     for (let i = 0; i < buf.nPointsSeed; i++) {
-      const x = p[i * 3];
-      const y = p[i * 3 + 1];
+      const [x, y] = mapWxy(p[i * 3], p[i * 3 + 1], M);
       const z = p[i * 3 + 2];
       if (weighted) {
         const s = radialScaleFromR(Math.hypot(x, y), radialMin, radialMax);
@@ -267,18 +358,23 @@ function applyBuffers(ctx: ThreeCtx, buf: SceneBuffers | null, sizingRef: RefObj
   }
 }
 
-export function DiskView({
-  scene,
-  webGpuError,
-  showSeedLabels,
-  showCrosshair,
-  centerWeightedSizes,
-  radialScaleMin,
-  radialScaleMax,
-  nodeSizeMul,
-}: Props) {
+export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
+  {
+    scene,
+    webGpuError,
+    showSeedLabels,
+    showCrosshair,
+    centerWeightedSizes,
+    radialScaleMin,
+    radialScaleMax,
+    nodeSizeMul,
+  }: Props,
+  ref,
+) {
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<ThreeCtx | null>(null);
+  const diskViewTransformRef = useRef<DiskViewTransform>(defaultDiskViewTransform());
+  const prevSceneRef = useRef<SceneBuffers | null>(null);
   const sceneRef = useRef(scene);
   const showLabelsRef = useRef(showSeedLabels);
   const showCrosshairRef = useRef(showCrosshair);
@@ -306,6 +402,17 @@ export function DiskView({
     };
   }, [centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul]);
 
+  useImperativeHandle(ref, () => ({
+    resetView() {
+      diskViewTransformRef.current = defaultDiskViewTransform();
+      const c = ctxRef.current;
+      if (c) {
+        updateOrthographicCamera(c.camera, diskViewTransformRef.current);
+        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      }
+    },
+  }));
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host || webGpuError) return;
@@ -317,6 +424,7 @@ export function DiskView({
     const camera = new OrthographicCamera(-1.06, 1.06, 1.06, -1.06, 0.1, 10);
     camera.position.set(0, 0, 2);
     camera.lookAt(0, 0, 0);
+    updateOrthographicCamera(camera, diskViewTransformRef.current);
 
     const gridMat = new LineBasicMaterial({ color: 0x6e6e7a, opacity: 0.92, transparent: true });
     const g1 = new BufferGeometry().setFromPoints([
@@ -327,6 +435,10 @@ export function DiskView({
       { x: 0, y: -1.05, z: 0 },
       { x: 0, y: 1.05, z: 0 },
     ]);
+    /*
+     * Crosshair stays in scene W-plane (not composed with viewer Möbius): under Shift+drag
+     * hyperbolic pan, diameters through 0 would become circular arcs if transformed with T.
+     */
     const crosshairH = new LineSegments(g1, gridMat);
     const crosshairV = new LineSegments(g2, gridMat);
     crosshairH.visible = showCrosshairRef.current;
@@ -361,12 +473,62 @@ export function DiskView({
       const w = host.clientWidth;
       const h = host.clientHeight || w;
       renderer.setSize(w, h, false);
+      updateOrthographicCamera(camera, diskViewTransformRef.current);
+    };
+
+    let dragActive = false;
+    let lastPx = 0;
+    let lastPy = 0;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const tr = diskViewTransformRef.current;
+      tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
+      updateOrthographicCamera(camera, tr);
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      dragActive = true;
+      lastPx = e.clientX;
+      lastPy = e.clientY;
+      (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragActive) return;
+      const dx = e.clientX - lastPx;
+      const dy = e.clientY - lastPy;
+      lastPx = e.clientX;
+      lastPy = e.clientY;
+      const tr = diskViewTransformRef.current;
+      const canvas = renderer.domElement;
+      const cw = Math.max(1, canvas.clientWidth);
+      const ch = Math.max(1, canvas.clientHeight);
+      const worldSpan = (2 * BASE_HALF_EXTENT) / tr.zoom;
+      if (e.shiftKey) {
+        tr.mobius = incrementMobiusFromDrag(tr.mobius, dx, dy, cw, ch);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+      } else {
+        tr.panX -= (dx / cw) * worldSpan;
+        tr.panY += (dy / ch) * worldSpan;
+        updateOrthographicCamera(camera, tr);
+      }
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      dragActive = false;
+      try {
+        (e.currentTarget as HTMLCanvasElement).releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
     };
 
     const loop = () => {
       ctx.raf = requestAnimationFrame(loop);
       renderer.render(scene3, camera);
-      updateSeedLabelPositions(ctx, sceneRef.current, showLabelsRef.current);
+      updateSeedLabelPositions(ctx, sceneRef.current, showLabelsRef.current, diskViewTransformRef);
     };
 
     void (async () => {
@@ -377,7 +539,13 @@ export function DiskView({
         host.appendChild(labelsLayer);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         resize();
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef);
+        const el = renderer.domElement;
+        el.addEventListener("wheel", onWheel, { passive: false });
+        el.addEventListener("pointerdown", onPointerDown);
+        el.addEventListener("pointermove", onPointerMove);
+        el.addEventListener("pointerup", onPointerUp);
+        el.addEventListener("pointercancel", onPointerUp);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
         syncSeedLabelDom(ctx, sceneRef.current, showLabelsRef.current);
         loop();
       } catch (e) {
@@ -394,7 +562,12 @@ export function DiskView({
       ro.disconnect();
       if (renderer.domElement.parentElement === host) host.removeChild(renderer.domElement);
       if (labelsLayer.parentElement === host) host.removeChild(labelsLayer);
-      applyBuffers(ctx, null, diskDisplayRef);
+      renderer.domElement.removeEventListener("wheel", onWheel);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointercancel", onPointerUp);
+      applyBuffers(ctx, null, diskDisplayRef, diskViewTransformRef);
       syncSeedLabelDom(ctx, null, false);
       renderer.dispose();
       ctxRef.current = null;
@@ -404,7 +577,12 @@ export function DiskView({
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
-    applyBuffers(ctx, scene, diskDisplayRef);
+    if (prevSceneRef.current !== scene) {
+      prevSceneRef.current = scene;
+      diskViewTransformRef.current = defaultDiskViewTransform();
+      updateOrthographicCamera(ctx.camera, diskViewTransformRef.current);
+    }
+    applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
   }, [scene, showSeedLabels, centerWeightedSizes, radialScaleMin, radialScaleMax, nodeSizeMul, webGpuError]);
 
@@ -442,4 +620,6 @@ export function DiskView({
       ) : null}
     </div>
   );
-}
+});
+
+DiskView.displayName = "DiskView";

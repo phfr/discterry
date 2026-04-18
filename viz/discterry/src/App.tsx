@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { loadGraphBundle, loadMeta, type GraphBundle } from "./data/loadBundle";
 import { RIM_CULL_EPS, RIM_CULL_EPS_SLIDER_MAX } from "./math/constants";
 import { computeScene, type SceneBuffers, type SceneStats } from "./model/computeScene";
 import { z0FromProtein } from "./z0FromProtein";
-import { DiskView } from "./viz/DiskView";
+import { DiskView, type DiskViewHandle } from "./viz/DiskView";
 
 const DEFAULT_RADIAL_SCALE_MIN = 0.25;
 const DEFAULT_RADIAL_SCALE_MAX = 2;
@@ -82,6 +82,7 @@ export default function App() {
   const [radialScaleMin, setRadialScaleMin] = useState(DEFAULT_RADIAL_SCALE_MIN);
   const [radialScaleMax, setRadialScaleMax] = useState(DEFAULT_RADIAL_SCALE_MAX);
   const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
+  const diskViewRef = useRef<DiskViewHandle>(null);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -163,6 +164,7 @@ export default function App() {
   return (
     <div className="shell">
       <DiskView
+        ref={diskViewRef}
         scene={scene}
         webGpuError={webGpuError}
         showSeedLabels={showSeedLabels}
@@ -176,6 +178,17 @@ export default function App() {
       <details className="advancedPanel">
         <summary>Advanced</summary>
         <div className="advancedInner">
+          <p className="advancedNavHint">
+            Canvas: wheel = zoom, drag = pan. Shift+drag = Möbius pan (hyperbolic).
+          </p>
+          <button
+            type="button"
+            className="resetViewBtn"
+            onClick={() => diskViewRef.current?.resetView()}
+            disabled={!!webGpuError}
+          >
+            Reset view
+          </button>
           <label className="seedLabelsCb">
             <input
               type="checkbox"
