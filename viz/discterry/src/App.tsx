@@ -19,7 +19,7 @@ import { bundleToCSR } from "./model/graphSearch";
 import { tryBuildPrimMstOverlay } from "./model/primMstOverlay";
 import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
-import { nodeListTooltip, nodeListTooltipForIndex } from "./nodeListTooltip";
+import { nodeDiskHoverTooltipForIndex, nodeListTooltip } from "./nodeListTooltip";
 import { analysisKeyboardGuard } from "./analysisKeyboardGuard";
 import { AnalysisFloater } from "./viz/AnalysisFloater";
 import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
@@ -353,26 +353,60 @@ export default function App() {
     cancelPrimMstFadeTimers,
   ]);
 
+  const commitSeedsText = useCallback(
+    (text: string): boolean => {
+      setFormErr(null);
+      if (!bundle) return false;
+      const seeds = parseSeeds(text);
+      if (seeds.size === 0) {
+        setFormErr("Need ≥1 seed");
+        return false;
+      }
+      const unknown = [...seeds].filter((n) => !bundle.nameToIndex.has(n));
+      if (unknown.length) {
+        setFormErr(`Unknown: ${unknown.slice(0, 5).join(", ")}`);
+        return false;
+      }
+      setSeedsDraft(text);
+      setAppliedSeedsText(text);
+      const f = appliedFocus.trim();
+      if (!f || !seeds.has(f) || !bundle.nameToIndex.has(f)) {
+        const first = [...seeds].find((n) => bundle.nameToIndex.has(n));
+        if (first) setAppliedFocus(first);
+      }
+      return true;
+    },
+    [bundle, appliedFocus],
+  );
+
   const onApplySeeds = useCallback(() => {
-    setFormErr(null);
-    if (!bundle) return;
-    const seeds = parseSeeds(seedsDraft);
-    if (seeds.size === 0) {
-      setFormErr("Need ≥1 seed");
-      return;
-    }
-    const unknown = [...seeds].filter((n) => !bundle.nameToIndex.has(n));
-    if (unknown.length) {
-      setFormErr(`Unknown: ${unknown.slice(0, 5).join(", ")}`);
-      return;
-    }
-    setAppliedSeedsText(seedsDraft);
-    const f = appliedFocus.trim();
-    if (!f || !seeds.has(f) || !bundle.nameToIndex.has(f)) {
-      const first = [...seeds].find((n) => bundle.nameToIndex.has(n));
-      if (first) setAppliedFocus(first);
-    }
-  }, [bundle, seedsDraft, appliedFocus]);
+    commitSeedsText(seedsDraft);
+  }, [commitSeedsText, seedsDraft]);
+
+  const shiftPickGraphIndex = useCallback(
+    (graphIndex: number) => {
+      if (!bundle || graphIndex < 0 || graphIndex >= bundle.vertex.length) return;
+      const name = bundle.vertex[graphIndex]!;
+      const seeds = parseSeeds(seedsDraft);
+      if (seeds.has(name)) {
+        const tokens = seedsDraft
+          .split(/\s+/)
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .filter((t) => t !== name);
+        if (tokens.length === 0) {
+          setFormErr("Need ≥1 seed");
+          return;
+        }
+        commitSeedsText(tokens.join(" "));
+        return;
+      }
+      const trimmed = seedsDraft.trim();
+      const next = trimmed ? `${trimmed} ${name}` : name;
+      commitSeedsText(next);
+    },
+    [bundle, seedsDraft, commitSeedsText],
+  );
 
   const onPickFocus = useCallback(
     (name: string) => {
@@ -471,13 +505,14 @@ export default function App() {
       return;
     }
     nodeInteractionRef.current = {
-      tooltipForGraphIndex: (i: number) => nodeListTooltipForIndex(bundle, i, degrees, runMeta),
+      tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForIndex(bundle, i, degrees, runMeta),
       pickGraphIndex: (i: number) => {
         if (i < 0 || i >= bundle.vertex.length) return;
         onPickFocus(bundle.vertex[i]!);
       },
+      shiftPickGraphIndex,
     };
-  }, [bundle, degrees, onPickFocus, runMeta]);
+  }, [bundle, degrees, onPickFocus, runMeta, shiftPickGraphIndex]);
 
   const stats: SceneStats | null = scene?.stats ?? null;
   const focusUiKey = focusAnimTarget?.trim() || appliedFocus.trim();
@@ -508,6 +543,8 @@ export default function App() {
         bundle={bundle}
         degrees={degrees}
         seedNamesOrdered={analysisSeedOrder}
+        z0={z0Current}
+        csr={graphCSR}
       />
 
       <PathTreesFloater

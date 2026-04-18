@@ -15,28 +15,22 @@ function appendRunMetaLines(lines: string[], runMeta: MetaJson | null | undefine
   if (runMeta.kappa_min !== undefined) bits.push(`κ_min=${fmtDisk(runMeta.kappa_min)}`);
   if (bits.length) lines.push(`run: ${bits.join("  ")}`);
   if (runMeta.run_subdir) lines.push(`run_subdir: ${runMeta.run_subdir}`);
-  if (runMeta.inf_coord_path) lines.push(`inf_coord: ${runMeta.inf_coord_path}`);
-  if (bits.length || runMeta.run_subdir || runMeta.inf_coord_path) lines.push("—");
+  if (bits.length || runMeta.run_subdir) lines.push("—");
 }
 
-/** Same text as the focus list `title` — Parquet disk coords, D-Mercator columns, degree, optional run header. */
-export function nodeListTooltip(
-  bundle: GraphBundle,
-  name: string,
-  degree: number | null,
-  runMeta?: MetaJson | null,
-): string {
-  const j = bundle.nameToIndex.get(name);
-  if (j === undefined) return name;
-  const lines: string[] = [];
-  appendRunMetaLines(lines, runMeta);
+/** Disk canvas hover: headline + monospace details (no duplicate name/degree in body). */
+export type NodeDiskHoverTooltip = {
+  name: string;
+  degree: string;
+  details: string;
+};
 
+function appendGeometryLines(lines: string[], bundle: GraphBundle, j: number): void {
   const x = bundle.x[j];
   const y = bundle.y[j];
   const rz = Math.hypot(x, y);
   const ang = (Math.atan2(y, x) * 180) / Math.PI;
   lines.push(
-    `vertex: ${bundle.vertex[j]}`,
     `index: ${j}`,
     `disk x: ${fmtDisk(x)}`,
     `disk y: ${fmtDisk(y)}`,
@@ -52,6 +46,38 @@ export function nodeListTooltip(
       `Inf.Pos.3: ${fmtDisk(bundle.infPos3[j]!)}`,
     );
   }
+}
+
+/** Rich hover for WebGL disk node cursor (structured; rendered in DiskView). */
+export function nodeDiskHoverTooltipForIndex(
+  bundle: GraphBundle,
+  graphIndex: number,
+  degrees: Int32Array | null,
+  runMeta?: MetaJson | null,
+): NodeDiskHoverTooltip | null {
+  if (graphIndex < 0 || graphIndex >= bundle.vertex.length) return null;
+  const name = bundle.vertex[graphIndex]!;
+  const d = degrees && graphIndex < degrees.length ? degrees[graphIndex]! : null;
+  const degreeStr = d !== null ? String(d) : "—";
+  const lines: string[] = [];
+  appendRunMetaLines(lines, runMeta);
+  appendGeometryLines(lines, bundle, graphIndex);
+  return { name, degree: degreeStr, details: lines.join("\n") };
+}
+
+/** Same text as the focus list `title` — Parquet disk coords, D-Mercator columns, degree, optional run header. */
+export function nodeListTooltip(
+  bundle: GraphBundle,
+  name: string,
+  degree: number | null,
+  runMeta?: MetaJson | null,
+): string {
+  const j = bundle.nameToIndex.get(name);
+  if (j === undefined) return name;
+  const lines: string[] = [];
+  appendRunMetaLines(lines, runMeta);
+  lines.push(`vertex: ${bundle.vertex[j]}`);
+  appendGeometryLines(lines, bundle, j);
   lines.push(`degree: ${degree !== null ? String(degree) : "—"}`);
   return lines.join("\n");
 }

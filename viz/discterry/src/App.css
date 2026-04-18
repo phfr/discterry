@@ -9,17 +9,47 @@
   position: fixed;
   z-index: 30;
   pointer-events: none;
-  max-width: 240px;
+  max-width: 280px;
   padding: 8px 10px;
   font-size: 10px;
   line-height: 1.35;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #e8e8ee;
   background: rgba(20, 22, 32, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.diskNodeTooltipHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.diskNodeTooltipName {
+  font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  color: #f4f4f8;
+}
+
+.diskNodeTooltipDeg {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: #aeb4c4;
+}
+
+.diskNodeTooltipBody {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.35;
   white-space: pre-wrap;
+  color: #d8d8e0;
 }
 
 .advancedPanel {
@@ -75,8 +105,6 @@
   flex-direction: column;
   min-width: 280px;
   min-height: 200px;
-  max-width: min(45vw, 520px);
-  max-height: min(40vh, 420px);
   resize: both;
   overflow: auto;
   border-radius: 8px;
@@ -182,6 +210,16 @@
   cursor: pointer;
 }
 
+.analysisSeedPairSummary {
+  flex-shrink: 0;
+  padding: 4px 10px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #a8a8b2;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  word-break: break-word;
+}
+
 .analysisFloaterBody {
   flex: 1 1 auto;
   min-height: 0;
@@ -204,8 +242,6 @@
   display: flex;
   flex-direction: column;
   min-width: 300px;
-  max-width: min(48vw, 440px);
-  max-height: min(52vh, 480px);
   resize: both;
   overflow: auto;
   border-radius: 8px;

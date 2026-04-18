@@ -31,6 +31,7 @@ import { LineSegments2 } from "three/addons/lines/webgpu/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
 import type { SceneBuffers } from "../model/computeScene";
+import type { NodeDiskHoverTooltip } from "../nodeListTooltip";
 import {
   applyMobiusToW,
   identityMobius,
@@ -76,10 +77,12 @@ export type DiskViewHandle = {
   setPathOverlayOpacityMultiplier: (mult: number) => void;
 };
 
-/** Filled by App: map graph index → list tooltip text; pick sets focus by vertex index. */
+/** Filled by App: map graph index → hover payload; pick sets focus by vertex index. */
 export type DiskViewNodeInteraction = {
-  tooltipForGraphIndex: (graphIndex: number) => string;
+  tooltipForGraphIndex: (graphIndex: number) => NodeDiskHoverTooltip | null;
   pickGraphIndex: (graphIndex: number) => void;
+  /** Shift+click on a node (no drag): optional, e.g. append seed + apply. */
+  shiftPickGraphIndex?: (graphIndex: number) => void;
 };
 
 function defaultDiskViewTransform(): DiskViewTransform {
@@ -738,20 +741,34 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
 
     const hideNodeTip = () => {
       nodeTipEl.style.display = "none";
-      nodeTipEl.textContent = "";
+      nodeTipEl.replaceChildren();
     };
-    const showNodeTip = (e: PointerEvent, text: string) => {
-      if (!text) {
+    const showNodeTip = (e: PointerEvent, tip: NodeDiskHoverTooltip | null) => {
+      if (!tip?.name) {
         hideNodeTip();
         return;
       }
-      nodeTipEl.textContent = text;
+      nodeTipEl.replaceChildren();
+      const head = document.createElement("div");
+      head.className = "diskNodeTooltipHead";
+      const nameEl = document.createElement("span");
+      nameEl.className = "diskNodeTooltipName";
+      nameEl.textContent = tip.name;
+      const degEl = document.createElement("span");
+      degEl.className = "diskNodeTooltipDeg";
+      degEl.textContent = tip.degree === "—" ? "deg —" : `deg ${tip.degree}`;
+      head.append(nameEl, degEl);
+      const body = document.createElement("div");
+      body.className = "diskNodeTooltipBody";
+      body.textContent = tip.details;
+      nodeTipEl.append(head, body);
       nodeTipEl.style.display = "block";
       const pad = 14;
-      const tw = 240;
-      const th = 100;
-      nodeTipEl.style.left = `${Math.min(e.clientX + pad, window.innerWidth - tw)}px`;
-      nodeTipEl.style.top = `${Math.min(e.clientY + pad, window.innerHeight - th)}px`;
+      const rect = nodeTipEl.getBoundingClientRect();
+      const tw = Math.ceil(rect.width);
+      const th = Math.ceil(rect.height);
+      nodeTipEl.style.left = `${Math.min(e.clientX + pad, Math.max(0, window.innerWidth - tw - 4))}px`;
+      nodeTipEl.style.top = `${Math.min(e.clientY + pad, Math.max(0, window.innerHeight - th - 4))}px`;
     };
 
     const resize = () => {
@@ -865,11 +882,18 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         /* already released */
       }
       dragActive = false;
+      syncShiftFromEvent(e);
+      const shiftPick =
+        !wasDrag &&
+        (e.shiftKey || (typeof e.getModifierState === "function" && e.getModifierState("Shift")));
       if (!wasDrag) {
         const nip = nodeInteractionRef?.current;
         if (nip && buf) {
           const gid = pickGraphIndexAtPointerEvent(e, canvas, camera, buf, ctx, ndcPointer, raycaster);
-          if (gid !== null) nip.pickGraphIndex(gid);
+          if (gid !== null) {
+            if (shiftPick && nip.shiftPickGraphIndex) nip.shiftPickGraphIndex(gid);
+            else if (!shiftPick) nip.pickGraphIndex(gid);
+          }
         }
       }
       const nip = nodeInteractionRef?.current;
