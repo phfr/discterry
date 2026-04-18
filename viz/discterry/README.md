@@ -1,6 +1,6 @@
-# D-Mercator Möbius disk (WebGPU)
+# Discterry — Poincaré disk (WebGPU)
 
-Interactive **Poincaré disk** view of a D-Mercator run: choose a **focus** protein and **seed** proteins (same logic as [`notebooks/dmercator/02d_disk_focus_mobius.ipynb`](../notebooks/dmercator/02d_disk_focus_mobius.ipynb)). Rendering uses **Three.js `WebGPURenderer` only** (no WebGL fallback).
+**Discterry** is an interactive **Poincaré disk** view of a PPI graph run: choose a **focus** protein and **seed** proteins (same logic as [`notebooks/dmercator/02d_disk_focus_mobius.ipynb`](../notebooks/dmercator/02d_disk_focus_mobius.ipynb)). Rendering uses **Three.js `WebGPURenderer` only** (no WebGL fallback).
 
 ## Requirements
 
@@ -15,7 +15,7 @@ Generate these with **[`notebooks/dmercator/04_export_disk_web_bundle.ipynb`](..
 ## Commands
 
 ```bash
-cd viz/dmercator-disk
+cd viz/discterry
 npm install
 npm run dev
 ```
@@ -33,3 +33,5 @@ npm run preview
 - **`src/data/loadBundle.ts`** — Parquet → typed arrays (`parquet-wasm` + `apache-arrow`)  
 - **`src/model/`** — seed edge filter, `computeScene` (geodesic line buffers)  
 - **`src/viz/DiskView.tsx`** — WebGPU scene and batched `LineSegments` / `Points`
+
+See **`CONCEPT.md`** for a full walkthrough of data and geometry.

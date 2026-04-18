@@ -1,0 +1,2 @@
+# Regenerate via repo export notebook → `public/data/` (often large)
+public/data/*.parquet

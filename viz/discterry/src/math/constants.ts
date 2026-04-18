@@ -1,5 +1,11 @@
-/** Match `02d_disk_focus_mobius.ipynb`: inward nudge when |z0| is near the boundary. */
-export const R_SAFE = 0.998;
+/**
+ * Inward nudge for focus `z0` when |z0| is extremely close to 1 (Blaschke denominator).
+ * The notebook uses 0.998, but many real vertices (e.g. CATSPER1 ~0.99966) lie above that;
+ * nudging `z0` while leaving graph coords at the raw rim point breaks `T(z_focus)=0`, so the
+ * focus no longer sits on the crosshair. Use a much tighter margin so typical rim genes still
+ * use the true disk coordinate as the Möbius center.
+ */
+export const R_SAFE = 0.999999;
 
 /** Samples per Poincaré geodesic polyline. */
 export const GEODESIC_N = 96;

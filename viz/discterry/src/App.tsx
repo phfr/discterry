@@ -30,6 +30,30 @@ function vertexDegrees(bundle: GraphBundle): Int32Array {
   return d;
 }
 
+function fmtDisk(n: number): string {
+  return Number.isFinite(n) ? n.toFixed(6) : String(n);
+}
+
+/** Native tooltip: every scalar we load for this vertex (parquet `nodes`) plus degree from edges. */
+function nodeListTooltip(bundle: GraphBundle, name: string, degree: number | null): string {
+  const j = bundle.nameToIndex.get(name);
+  if (j === undefined) return name;
+  const x = bundle.x[j];
+  const y = bundle.y[j];
+  const rz = Math.hypot(x, y);
+  const ang = (Math.atan2(y, x) * 180) / Math.PI;
+  const lines = [
+    `vertex: ${bundle.vertex[j]}`,
+    `index: ${j}`,
+    `disk x: ${fmtDisk(x)}`,
+    `disk y: ${fmtDisk(y)}`,
+    `|z|: ${fmtDisk(rz)}`,
+    `arg z (deg): ${fmtDisk(ang)}`,
+    `degree: ${degree !== null ? String(degree) : "—"}`,
+  ];
+  return lines.join("\n");
+}
+
 /** Sorted clickable names: valid applied seeds, plus current focus if in bundle but not listed. */
 function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, appliedFocus: string): string[] {
   const seeds = [...parseSeeds(appliedSeedsText)].filter((n) => bundle.nameToIndex.has(n));
@@ -49,7 +73,7 @@ export default function App() {
   const [formErr, setFormErr] = useState<string | null>(null);
   const [rimCullEps, setRimCullEps] = useState(RIM_CULL_EPS);
   const [showSeedLabels, setShowSeedLabels] = useState(true);
-  const [showCrosshair, setShowCrosshair] = useState(true);
+  const [showCrosshair, setShowCrosshair] = useState(false);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -183,19 +207,17 @@ export default function App() {
           {pickerNames.map((name) => {
             const idx = bundle?.nameToIndex.get(name);
             const deg = idx !== undefined && degrees ? degrees[idx] : null;
+            const tip = bundle ? nodeListTooltip(bundle, name, deg) : name;
             return (
               <li key={name}>
                 <button
                   type="button"
                   className={name === appliedFocus.trim() ? "nameBtn nameBtnOn" : "nameBtn"}
                   onClick={() => onPickFocus(name)}
+                  title={tip}
                 >
                   <span className="nameBtnLabel">{name}</span>
-                  {deg !== null ? (
-                    <span className="nameDeg" title="Graph degree (undirected)">
-                      {deg}
-                    </span>
-                  ) : null}
+                  {deg !== null ? <span className="nameDeg">{deg}</span> : null}
                 </button>
               </li>
             );

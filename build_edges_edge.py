@@ -1,4 +1,4 @@
-"""Write D-Mercator edgelist (two names per line, no header) from edges.tsv."""
+"""Write disk-run edgelist (two names per line, no header) from edges.tsv."""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,7 @@ def main() -> None:
         "--output",
         type=Path,
         default=Path("edges.edge"),
-        help="Output edgelist for Mercator (default: edges.edge)",
+        help="Output edgelist for disk embedding pipeline (default: edges.edge)",
     )
     args = p.parse_args()
     if not args.input.is_file():
