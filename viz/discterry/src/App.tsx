@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import "./App.css";
 import { loadGraphBundle, loadMeta, type GraphBundle, type MetaJson } from "./data/loadBundle";
+import { loadGraphBundle3d, loadMeta3d, type GraphBundle3d } from "./data/loadBundle3d";
 import { RIM_CULL_EPS, RIM_CULL_EPS_SLIDER_MAX } from "./math/constants";
 import {
   easeInOutCubic,
@@ -15,13 +24,21 @@ import {
   type SceneBuffers,
   type SceneStats,
 } from "./model/computeScene";
+import { computeScene3d, type SceneBuffers3d } from "./model/computeScene3d";
 import { bundleToCSR } from "./model/graphSearch";
 import { tryBuildPrimMstOverlay } from "./model/primMstOverlay";
 import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
-import { nodeDiskHoverTooltipForIndex, nodeListTooltip } from "./nodeListTooltip";
+import { p0FromProtein } from "./p0FromProtein";
+import {
+  nodeDiskHoverTooltipForGraph3d,
+  nodeDiskHoverTooltipForIndex,
+  nodeListTooltip,
+  nodeListTooltip3d,
+} from "./nodeListTooltip";
 import { analysisKeyboardGuard } from "./analysisKeyboardGuard";
 import { AnalysisFloater } from "./viz/AnalysisFloater";
+import { BallView3d, type BallView3dHandle, type BallView3dNodeInteraction } from "./viz/BallView3d";
 import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
 import { PathTreesFloater } from "./viz/PathTreesFloater";
 
@@ -47,7 +64,7 @@ function webGpuSupported(): boolean {
   return typeof navigator !== "undefined" && !!navigator.gpu;
 }
 
-function vertexDegrees(bundle: GraphBundle): Int32Array {
+function vertexDegrees(bundle: { src: Int32Array; dst: Int32Array; vertex: string[] }): Int32Array {
   const n = bundle.vertex.length;
   const d = new Int32Array(n);
   const { src, dst } = bundle;
@@ -59,7 +76,11 @@ function vertexDegrees(bundle: GraphBundle): Int32Array {
 }
 
 /** Sorted clickable names: valid applied seeds, plus current focus if in bundle but not listed. */
-function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, appliedFocus: string): string[] {
+function focusPickerNames(
+  bundle: { nameToIndex: Map<string, number> },
+  appliedSeedsText: string,
+  appliedFocus: string,
+): string[] {
   const seeds = [...parseSeeds(appliedSeedsText)].filter((n) => bundle.nameToIndex.has(n));
   const set = new Set(seeds);
   const f = appliedFocus.trim();
@@ -87,7 +108,10 @@ function filterVertexNames(vertices: readonly string[], query: string, max: numb
 }
 
 /** Applied seed names in first-seen order (from applied text), bundle-valid only. */
-function appliedSeedNamesOrdered(bundle: GraphBundle, appliedSeedsText: string): string[] {
+function appliedSeedNamesOrdered(
+  bundle: { vertex: string[]; nameToIndex: Map<string, number> },
+  appliedSeedsText: string,
+): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const part of appliedSeedsText.split(/\s+/)) {
@@ -100,7 +124,11 @@ function appliedSeedNamesOrdered(bundle: GraphBundle, appliedSeedsText: string):
 }
 
 export default function App() {
+  const [dataMode, setDataMode] = useState<"2d" | "3d">(() =>
+    typeof window !== "undefined" && window.location.hash === "#3d" ? "3d" : "2d",
+  );
   const [bundle, setBundle] = useState<GraphBundle | null>(null);
+  const [bundle3d, setBundle3d] = useState<GraphBundle3d | null>(null);
   const [runMeta, setRunMeta] = useState<MetaJson | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [seedsDraft, setSeedsDraft] = useState("");
@@ -125,7 +153,8 @@ export default function App() {
   const [focusSearch, setFocusSearch] = useState("");
   const [focusSearchHl, setFocusSearchHl] = useState(0);
   const diskViewRef = useRef<DiskViewHandle>(null);
-  const nodeInteractionRef = useRef<DiskViewNodeInteraction | null>(null);
+  const ballViewRef = useRef<BallView3dHandle>(null);
+  const nodeInteractionRef = useRef<DiskViewNodeInteraction | BallView3dNodeInteraction | null>(null);
   const appliedFocusRef = useRef(appliedFocus);
   const focusAnimTargetRef = useRef<string | null>(null);
   const focusAnimGenRef = useRef(0);
@@ -152,22 +181,56 @@ export default function App() {
   );
 
   useEffect(() => {
+    const onHash = () => {
+      const next = window.location.hash === "#3d" ? "3d" : "2d";
+      setDataMode((m) => (m === next ? m : next));
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  /** M: toggle 2D / 3D (`#3d` hash). Shift+M on 2D disk: Prim MST overlay flash (see keydown handler below). */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (analysisKeyboardGuard(e)) return;
+      if (e.code !== "KeyM" || e.shiftKey) return;
+      e.preventDefault();
+      window.location.hash = window.location.hash === "#3d" ? "" : "#3d";
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const [b, meta] = await Promise.all([
-          loadGraphBundle(import.meta.env.BASE_URL),
-          loadMeta(import.meta.env.BASE_URL),
-        ]);
-        if (cancelled) return;
-        setBundle(b);
-        setRunMeta(meta ?? null);
-        const defF = meta?.default_focus?.trim() || b.vertex[0] || "";
-        const defSeeds = (meta?.default_seeds?.join(" ") || defF).replace(/\s+/g, " ").trim();
-        setSeedsDraft(defSeeds);
-        setAppliedFocus(defF);
-        setAppliedSeedsText(defSeeds);
-        setLoadErr(null);
+        const base = import.meta.env.BASE_URL;
+        if (dataMode === "3d") {
+          const [b, meta] = await Promise.all([loadGraphBundle3d(base), loadMeta3d(base)]);
+          if (cancelled) return;
+          setBundle(null);
+          setBundle3d(b);
+          setRunMeta(meta ?? null);
+          const defF = meta?.default_focus?.trim() || b.vertex[0] || "";
+          const defSeeds = (meta?.default_seeds?.join(" ") || defF).replace(/\s+/g, " ").trim();
+          setSeedsDraft(defSeeds);
+          setAppliedFocus(defF);
+          setAppliedSeedsText(defSeeds);
+          setLoadErr(null);
+        } else {
+          const [b, meta] = await Promise.all([loadGraphBundle(base), loadMeta(base)]);
+          if (cancelled) return;
+          setBundle3d(null);
+          setBundle(b);
+          setRunMeta(meta ?? null);
+          const defF = meta?.default_focus?.trim() || b.vertex[0] || "";
+          const defSeeds = (meta?.default_seeds?.join(" ") || defF).replace(/\s+/g, " ").trim();
+          setSeedsDraft(defSeeds);
+          setAppliedFocus(defF);
+          setAppliedSeedsText(defSeeds);
+          setLoadErr(null);
+        }
       } catch (e) {
         if (!cancelled) setLoadErr(e instanceof Error ? e.message : String(e));
       }
@@ -175,7 +238,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dataMode]);
 
   useEffect(() => {
     if (!isFocusAnimatingRef.current) return;
@@ -202,15 +265,30 @@ export default function App() {
     }
   }, [bundle, appliedFocus]);
 
-  const graphCSR = useMemo(() => (bundle ? bundleToCSR(bundle) : null), [bundle]);
+  const p0Ball = useMemo(() => {
+    if (!bundle3d || !appliedFocus.trim()) return null;
+    try {
+      return p0FromProtein(bundle3d, appliedFocus);
+    } catch {
+      return null;
+    }
+  }, [bundle3d, appliedFocus]);
 
-  const graphInteractionKey = useMemo(
-    () =>
-      bundle
-        ? `${bundle.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}`
-        : "",
-    [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode],
-  );
+  const graphCSR = useMemo(() => {
+    if (bundle) return bundleToCSR(bundle);
+    if (bundle3d) return bundleToCSR(bundle3d);
+    return null;
+  }, [bundle, bundle3d]);
+
+  const graphInteractionKey = useMemo(() => {
+    if (dataMode === "3d" && bundle3d) {
+      return `3d|${bundle3d.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}`;
+    }
+    if (bundle) {
+      return `2d|${bundle.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}`;
+    }
+    return "";
+  }, [dataMode, bundle, bundle3d, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode]);
 
   const [pathOverlayPinned, setPathOverlayPinned] = useState<{
     buf: PathOverlayBuffer;
@@ -251,33 +329,64 @@ export default function App() {
     [graphInteractionKey, cancelPrimMstFadeTimers],
   );
 
-  const scene: SceneBuffers | null = useMemo(() => {
-    if (!bundle || !appliedFocus.trim() || !z0Current) return null;
-    try {
-      const seeds = parseSeeds(appliedSeedsText);
-      if (seeds.size === 0) return null;
-      return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode, showAllGraphEdges);
-    } catch {
-      return null;
+  const scene: SceneBuffers | SceneBuffers3d | null = useMemo(() => {
+    const seeds = parseSeeds(appliedSeedsText);
+    if (seeds.size === 0) return null;
+    if (bundle3d && p0Ball) {
+      try {
+        return computeScene3d(
+          bundle3d,
+          p0Ball.x,
+          p0Ball.y,
+          p0Ball.z,
+          seeds,
+          rimCullEps,
+          nonSeedShowMode,
+          showAllGraphEdges,
+        );
+      } catch {
+        return null;
+      }
     }
-  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, z0Current]);
+    if (bundle && z0Current) {
+      try {
+        return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode, showAllGraphEdges);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }, [
+    bundle,
+    bundle3d,
+    appliedSeedsText,
+    rimCullEps,
+    nonSeedShowMode,
+    showAllGraphEdges,
+    z0Current,
+    p0Ball,
+  ]);
 
+  const pickerGraph = bundle ?? bundle3d;
   const pickerNames = useMemo(
-    () => (bundle ? focusPickerNames(bundle, appliedSeedsText, appliedFocus) : []),
-    [bundle, appliedSeedsText, appliedFocus],
+    () => (pickerGraph ? focusPickerNames(pickerGraph, appliedSeedsText, appliedFocus) : []),
+    [pickerGraph, appliedSeedsText, appliedFocus],
   );
 
-  const degrees = useMemo(() => (bundle ? vertexDegrees(bundle) : null), [bundle]);
+  const degrees = useMemo(
+    () => (pickerGraph ? vertexDegrees(pickerGraph) : null),
+    [pickerGraph],
+  );
 
   const analysisSeedOrder = useMemo(
-    () => (bundle ? appliedSeedNamesOrdered(bundle, appliedSeedsText) : []),
-    [bundle, appliedSeedsText],
+    () => (pickerGraph ? appliedSeedNamesOrdered(pickerGraph, appliedSeedsText) : []),
+    [pickerGraph, appliedSeedsText],
   );
 
   const focusSearchMatches = useMemo(() => {
-    if (!bundle) return [];
-    return filterVertexNames(bundle.vertex, focusSearch, FOCUS_SEARCH_MAX);
-  }, [bundle, focusSearch]);
+    if (!pickerGraph) return [];
+    return filterVertexNames(pickerGraph.vertex, focusSearch, FOCUS_SEARCH_MAX);
+  }, [pickerGraph, focusSearch]);
 
   useLayoutEffect(() => {
     setFocusSearchHl((i) => {
@@ -287,9 +396,20 @@ export default function App() {
   }, [focusSearchMatches]);
 
   useEffect(() => {
-    if (webGpuError || !bundle) return;
+    if (webGpuError) return;
     const onKey = (e: KeyboardEvent) => {
       if (analysisKeyboardGuard(e)) return;
+      if (bundle3d) {
+        if (e.code === "KeyR") {
+          e.preventDefault();
+          ballViewRef.current?.resetView();
+        } else if (e.code === "KeyF") {
+          e.preventDefault();
+          ballViewRef.current?.fitSubgraphToView();
+        }
+        return;
+      }
+      if (!bundle) return;
       if (e.code === "KeyR") {
         e.preventDefault();
         diskViewRef.current?.resetView();
@@ -305,7 +425,7 @@ export default function App() {
       } else if (e.code === "KeyU" && e.shiftKey) {
         e.preventDefault();
         setShowAllGraphEdges((o) => !o);
-      } else if (e.code === "KeyM") {
+      } else if (e.code === "KeyM" && e.shiftKey) {
         e.preventDefault();
         if (!z0Current) return;
         cancelPrimMstFadeTimers();
@@ -347,6 +467,7 @@ export default function App() {
   }, [
     webGpuError,
     bundle,
+    bundle3d,
     z0Current,
     appliedSeedsText,
     graphInteractionKey,
@@ -356,13 +477,14 @@ export default function App() {
   const commitSeedsText = useCallback(
     (text: string): boolean => {
       setFormErr(null);
-      if (!bundle) return false;
+      const bg = bundle ?? bundle3d;
+      if (!bg) return false;
       const seeds = parseSeeds(text);
       if (seeds.size === 0) {
         setFormErr("Need ≥1 seed");
         return false;
       }
-      const unknown = [...seeds].filter((n) => !bundle.nameToIndex.has(n));
+      const unknown = [...seeds].filter((n) => !bg.nameToIndex.has(n));
       if (unknown.length) {
         setFormErr(`Unknown: ${unknown.slice(0, 5).join(", ")}`);
         return false;
@@ -370,13 +492,13 @@ export default function App() {
       setSeedsDraft(text);
       setAppliedSeedsText(text);
       const f = appliedFocus.trim();
-      if (!f || !seeds.has(f) || !bundle.nameToIndex.has(f)) {
-        const first = [...seeds].find((n) => bundle.nameToIndex.has(n));
+      if (!f || !seeds.has(f) || !bg.nameToIndex.has(f)) {
+        const first = [...seeds].find((n) => bg.nameToIndex.has(n));
         if (first) setAppliedFocus(first);
       }
       return true;
     },
-    [bundle, appliedFocus],
+    [bundle, bundle3d, appliedFocus],
   );
 
   const onApplySeeds = useCallback(() => {
@@ -385,8 +507,9 @@ export default function App() {
 
   const shiftPickGraphIndex = useCallback(
     (graphIndex: number) => {
-      if (!bundle || graphIndex < 0 || graphIndex >= bundle.vertex.length) return;
-      const name = bundle.vertex[graphIndex]!;
+      const bg = bundle ?? bundle3d;
+      if (!bg || graphIndex < 0 || graphIndex >= bg.vertex.length) return;
+      const name = bg.vertex[graphIndex]!;
       const seeds = parseSeeds(seedsDraft);
       if (seeds.has(name)) {
         const tokens = seedsDraft
@@ -405,7 +528,7 @@ export default function App() {
       const next = trimmed ? `${trimmed} ${name}` : name;
       commitSeedsText(next);
     },
-    [bundle, seedsDraft, commitSeedsText],
+    [bundle, bundle3d, seedsDraft, commitSeedsText],
   );
 
   const onPickFocus = useCallback(
@@ -413,6 +536,16 @@ export default function App() {
       setFormErr(null);
       const t = name.trim();
       if (webGpuError) {
+        setAppliedFocus(t);
+        return;
+      }
+      if (bundle3d) {
+        if (t === appliedFocusRef.current.trim()) return;
+        try {
+          p0FromProtein(bundle3d, t);
+        } catch {
+          return;
+        }
         setAppliedFocus(t);
         return;
       }
@@ -496,23 +629,34 @@ export default function App() {
       };
       focusAnimRafRef.current = requestAnimationFrame(tick);
     },
-    [bundle, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, webGpuError],
+    [bundle, bundle3d, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, webGpuError],
   );
 
   useLayoutEffect(() => {
-    if (!bundle || !degrees) {
-      nodeInteractionRef.current = null;
+    if (bundle3d && degrees) {
+      nodeInteractionRef.current = {
+        tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForGraph3d(bundle3d, i, degrees, runMeta),
+        pickGraphIndex: (i: number) => {
+          if (i < 0 || i >= bundle3d.vertex.length) return;
+          onPickFocus(bundle3d.vertex[i]!);
+        },
+        shiftPickGraphIndex,
+      };
       return;
     }
-    nodeInteractionRef.current = {
-      tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForIndex(bundle, i, degrees, runMeta),
-      pickGraphIndex: (i: number) => {
-        if (i < 0 || i >= bundle.vertex.length) return;
-        onPickFocus(bundle.vertex[i]!);
-      },
-      shiftPickGraphIndex,
-    };
-  }, [bundle, degrees, onPickFocus, runMeta, shiftPickGraphIndex]);
+    if (bundle && degrees) {
+      nodeInteractionRef.current = {
+        tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForIndex(bundle, i, degrees, runMeta),
+        pickGraphIndex: (i: number) => {
+          if (i < 0 || i >= bundle.vertex.length) return;
+          onPickFocus(bundle.vertex[i]!);
+        },
+        shiftPickGraphIndex,
+      };
+      return;
+    }
+    nodeInteractionRef.current = null;
+  }, [bundle, bundle3d, degrees, onPickFocus, runMeta, shiftPickGraphIndex]);
 
   const stats: SceneStats | null = scene?.stats ?? null;
   const focusUiKey = focusAnimTarget?.trim() || appliedFocus.trim();
@@ -521,44 +665,64 @@ export default function App() {
     <div
       className="shell"
     >
-      <DiskView
-        ref={diskViewRef}
-        scene={scene}
-        pathOverlay={pathOverlay}
-        webGpuError={webGpuError}
-        showSeedLabels={showSeedLabels}
-        showCrosshair={showCrosshair}
-        centerWeightedSizes={centerWeightedSizes}
-        radialScaleMin={radialScaleMin}
-        radialScaleMax={radialScaleMax}
-        nodeSizeMul={nodeSizeMul}
-        compensateZoomNodes={compensateZoomNodes}
-        nodeMinMul={nodeMinMul}
-        nodeInteractionRef={nodeInteractionRef}
-      />
+      {bundle3d ? (
+        <BallView3d
+          ref={ballViewRef}
+          scene={scene as SceneBuffers3d | null}
+          webGpuError={webGpuError}
+          showSeedLabels={showSeedLabels}
+          nodeInteractionRef={nodeInteractionRef as RefObject<BallView3dNodeInteraction | null>}
+          centerWeightedSizes={centerWeightedSizes}
+          radialScaleMin={radialScaleMin}
+          radialScaleMax={radialScaleMax}
+          nodeSizeMul={nodeSizeMul}
+          compensateZoomNodes={compensateZoomNodes}
+          nodeMinMul={nodeMinMul}
+        />
+      ) : (
+        <DiskView
+          ref={diskViewRef}
+          scene={scene as SceneBuffers | null}
+          pathOverlay={pathOverlay}
+          webGpuError={webGpuError}
+          showSeedLabels={showSeedLabels}
+          showCrosshair={showCrosshair}
+          centerWeightedSizes={centerWeightedSizes}
+          radialScaleMin={radialScaleMin}
+          radialScaleMax={radialScaleMax}
+          nodeSizeMul={nodeSizeMul}
+          compensateZoomNodes={compensateZoomNodes}
+          nodeMinMul={nodeMinMul}
+          nodeInteractionRef={nodeInteractionRef as RefObject<DiskViewNodeInteraction | null>}
+        />
+      )}
 
-      <AnalysisFloater
-        open={analysisOpen}
-        onClose={() => setAnalysisOpen(false)}
-        bundle={bundle}
-        degrees={degrees}
-        seedNamesOrdered={analysisSeedOrder}
-        z0={z0Current}
-        csr={graphCSR}
-      />
+      {!bundle3d ? (
+        <AnalysisFloater
+          open={analysisOpen}
+          onClose={() => setAnalysisOpen(false)}
+          bundle={bundle}
+          degrees={degrees}
+          seedNamesOrdered={analysisSeedOrder}
+          z0={z0Current}
+          csr={graphCSR}
+        />
+      ) : null}
 
-      <PathTreesFloater
-        open={pathTreesOpen}
-        onClose={() => setPathTreesOpen(false)}
-        bundle={bundle}
-        scene={scene}
-        z0={z0Current}
-        csr={graphCSR}
-        pickerNames={pickerNames}
-        appliedFocus={appliedFocus}
-        appliedSeedsText={appliedSeedsText}
-        onPathOverlayChange={handlePathOverlayChange}
-      />
+      {!bundle3d ? (
+        <PathTreesFloater
+          open={pathTreesOpen}
+          onClose={() => setPathTreesOpen(false)}
+          bundle={bundle}
+          scene={scene as SceneBuffers | null}
+          z0={z0Current}
+          csr={graphCSR}
+          pickerNames={pickerNames}
+          appliedFocus={appliedFocus}
+          appliedSeedsText={appliedSeedsText}
+          onPathOverlayChange={handlePathOverlayChange}
+        />
+      ) : null}
 
       <details className="advancedPanel">
         <summary>Advanced</summary>
@@ -577,7 +741,9 @@ export default function App() {
           <button
             type="button"
             className="resetViewBtn"
-            onClick={() => diskViewRef.current?.resetView()}
+            onClick={() =>
+              bundle3d ? ballViewRef.current?.resetView() : diskViewRef.current?.resetView()
+            }
             disabled={!!webGpuError}
           >
             Reset view
@@ -725,15 +891,25 @@ export default function App() {
           spellCheck={false}
           aria-label="Seeds"
         />
-        <button type="button" className="applyMini" onClick={onApplySeeds} disabled={!bundle} title="Apply seeds">
+        <button
+          type="button"
+          className="applyMini"
+          onClick={onApplySeeds}
+          disabled={!pickerGraph}
+          title="Apply seeds"
+        >
           ↵
         </button>
         {formErr ? <div className="errLine">{formErr}</div> : null}
         <ul className="nameList" aria-label="Focus">
           {pickerNames.map((name) => {
-            const idx = bundle?.nameToIndex.get(name);
+            const idx = pickerGraph?.nameToIndex.get(name);
             const deg = idx !== undefined && degrees ? degrees[idx] : null;
-            const tip = bundle ? nodeListTooltip(bundle, name, deg, runMeta) : name;
+            const tip = pickerGraph
+              ? bundle3d
+                ? nodeListTooltip3d(bundle3d, name, deg, runMeta)
+                : nodeListTooltip(bundle!, name, deg, runMeta)
+              : name;
             return (
               <li key={name}>
                 <button
@@ -749,7 +925,7 @@ export default function App() {
             );
           })}
         </ul>
-        {bundle ? (
+        {pickerGraph ? (
           <div className="focusSearchWrap">
             <div className="focusSearchRow">
               <label className="focusSearchLabel" htmlFor="focusSearchInput">
@@ -776,7 +952,7 @@ export default function App() {
                       if (focusSearchMatches.length > 0) {
                         onPickFocus(focusSearchMatches[focusSearchHl]!);
                         setFocusSearch("");
-                      } else if (exact && bundle.nameToIndex.has(exact)) {
+                      } else if (exact && pickerGraph.nameToIndex.has(exact)) {
                         onPickFocus(exact);
                         setFocusSearch("");
                       }

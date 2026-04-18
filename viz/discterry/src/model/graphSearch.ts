@@ -1,4 +1,7 @@
 import type { GraphBundle } from "../data/loadBundle";
+import type { GraphBundle3d } from "../data/loadBundle3d";
+
+export type GraphEdgeBundle = Pick<GraphBundle, "src" | "dst" | "vertex"> | Pick<GraphBundle3d, "src" | "dst" | "vertex">;
 
 export type GraphCSR = {
   n: number;
@@ -187,6 +190,6 @@ export function primHyperbolicSeedEdges(
   return { edges, skipped: false };
 }
 
-export function bundleToCSR(bundle: GraphBundle): GraphCSR {
+export function bundleToCSR(bundle: GraphEdgeBundle): GraphCSR {
   return buildUndirectedCSR(bundle.src, bundle.dst, bundle.vertex.length);
 }
