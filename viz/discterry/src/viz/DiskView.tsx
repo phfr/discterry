@@ -67,6 +67,8 @@ export type DiskViewHandle = {
   resetView: () => void;
   /** Clear Euclidean pan and viewer Möbius; keep zoom (call when data focus `z0` changes so w=0 stays centered). */
   recenterPreservingZoom: () => void;
+  /** Zoom and pan so current scene node markers (seed + other) fit in view; uses viewer Möbius/rim as today. */
+  fitSubgraphToView: () => void;
   /** Push GPU buffers without waiting for React `scene` prop (focus animation frames). */
   applySceneBuffers: (buf: SceneBuffers | null) => void;
 };
@@ -174,6 +176,57 @@ type ThreeCtx = {
 };
 
 const CLICK_DRAG_PX = 6;
+/** Extra slack (screen px) for hover/click hit-testing when disk sprites are tiny. */
+const NODE_HOVER_PAD_PX = 3;
+
+const _pickProj = new Vector3();
+
+function pickGraphIndexByScreenProximity(
+  e: PointerEvent,
+  camera: InstanceType<typeof OrthographicCamera>,
+  buf: SceneBuffers,
+  ctx: ThreeCtx,
+  w: number,
+  h: number,
+  rect: DOMRect,
+): number | null {
+  const pad2 = NODE_HOVER_PAD_PX * NODE_HOVER_PAD_PX;
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  let bestD2 = Infinity;
+  let bestG: number | null = null;
+
+  const considerMesh = (mesh: InstanceType<typeof InstancedMesh> | null, gidAt: (i: number) => number | null) => {
+    if (!mesh) return;
+    const n = mesh.count;
+    for (let i = 0; i < n; i++) {
+      mesh.getMatrixAt(i, _m4);
+      _m4.decompose(_vPos, _qId, _vScale);
+      _pickProj.copy(_vPos).project(camera);
+      const sx = (_pickProj.x * 0.5 + 0.5) * w;
+      const sy = (-_pickProj.y * 0.5 + 0.5) * h;
+      const dx = sx - px;
+      const dy = sy - py;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= pad2 && d2 < bestD2) {
+        const g = gidAt(i);
+        if (g !== null) {
+          bestD2 = d2;
+          bestG = g;
+        }
+      }
+    }
+  };
+
+  /* Seeds checked first so equal-distance ties favor the top layer. */
+  considerMesh(ctx.meshSeeds, (i) =>
+    i >= 0 && i < buf.seedGraphIndex.length ? buf.seedGraphIndex[i]! : null,
+  );
+  considerMesh(ctx.meshOther, (i) =>
+    i >= 0 && i < buf.otherGraphIndex.length ? buf.otherGraphIndex[i]! : null,
+  );
+  return bestG;
+}
 
 function pickGraphIndexAtPointerEvent(
   e: PointerEvent,
@@ -197,12 +250,13 @@ function pickGraphIndexAtPointerEvent(
   if (!objs.length) return null;
   const hits = raycaster.intersectObjects(objs, false);
   const hit = hits[0];
-  if (!hit || hit.instanceId === undefined) return null;
-  const mesh = hit.object as InstanceType<typeof InstancedMesh>;
-  const iid = hit.instanceId;
-  if (mesh === ctx.meshSeeds && iid >= 0 && iid < buf.seedGraphIndex.length) return buf.seedGraphIndex[iid]!;
-  if (mesh === ctx.meshOther && iid >= 0 && iid < buf.otherGraphIndex.length) return buf.otherGraphIndex[iid]!;
-  return null;
+  if (hit?.instanceId !== undefined) {
+    const mesh = hit.object as InstanceType<typeof InstancedMesh>;
+    const iid = hit.instanceId;
+    if (mesh === ctx.meshSeeds && iid >= 0 && iid < buf.seedGraphIndex.length) return buf.seedGraphIndex[iid]!;
+    if (mesh === ctx.meshOther && iid >= 0 && iid < buf.otherGraphIndex.length) return buf.otherGraphIndex[iid]!;
+  }
+  return pickGraphIndexByScreenProximity(e, camera, buf, ctx, w, h, rect);
 }
 
 /** World-space radius under ortho ~±1.06; opaque filled disks on top of lines/points. */
@@ -495,6 +549,44 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         updateOrthographicCamera(c.camera, tr);
         applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
       }
+    },
+    fitSubgraphToView() {
+      const buf = sceneRef.current;
+      const c = ctxRef.current;
+      if (!buf || !c) return;
+      if (buf.nPointsSeed === 0 && buf.nPointsOther === 0) return;
+      const tr = diskViewTransformRef.current;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      const accumulate = (po: Float32Array) => {
+        for (let i = 0; i < po.length; i += 3) {
+          const [x, y] = mapViewerWxy(po[i], po[i + 1], tr);
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      };
+      accumulate(buf.pointsSeed);
+      accumulate(buf.pointsOther);
+      if (!Number.isFinite(minX) || maxX <= minX || maxY <= minY) return;
+      const cx = (minX + maxX) * 0.5;
+      const cy = (minY + maxY) * 0.5;
+      const PAD = 1.16;
+      let w = (maxX - minX) * PAD;
+      let h = (maxY - minY) * PAD;
+      const eps = 1e-6;
+      if (w < eps) w = 0.2;
+      if (h < eps) h = 0.2;
+      const zoomW = (2 * BASE_HALF_EXTENT) / w;
+      const zoomH = (2 * BASE_HALF_EXTENT) / h;
+      tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.min(zoomW, zoomH)));
+      tr.panX = cx;
+      tr.panY = cy;
+      updateOrthographicCamera(c.camera, tr);
+      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef);
     },
     applySceneBuffers(buf: SceneBuffers | null) {
       sceneRef.current = buf;

@@ -17,6 +17,8 @@ import {
 } from "./model/computeScene";
 import { z0FromProtein } from "./z0FromProtein";
 import { nodeListTooltip, nodeListTooltipForIndex } from "./nodeListTooltip";
+import { analysisKeyboardGuard } from "./analysisKeyboardGuard";
+import { AnalysisFloater } from "./viz/AnalysisFloater";
 import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
 
 const DEFAULT_RADIAL_SCALE_MIN = 0.2;
@@ -59,6 +61,19 @@ function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, applied
   return seeds;
 }
 
+/** Applied seed names in first-seen order (from applied text), bundle-valid only. */
+function appliedSeedNamesOrdered(bundle: GraphBundle, appliedSeedsText: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of appliedSeedsText.split(/\s+/)) {
+    const t = part.trim();
+    if (!t || !bundle.nameToIndex.has(t) || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
 export default function App() {
   const [bundle, setBundle] = useState<GraphBundle | null>(null);
   const [runMeta, setRunMeta] = useState<MetaJson | null>(null);
@@ -78,6 +93,7 @@ export default function App() {
   const [nodeMinMul, setNodeMinMul] = useState(DEFAULT_NODE_MIN_MUL);
   const [nonSeedShowMode, setNonSeedShowMode] = useState<NonSeedShowMode>("all");
   const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
   const diskViewRef = useRef<DiskViewHandle>(null);
   const nodeInteractionRef = useRef<DiskViewNodeInteraction | null>(null);
   const appliedFocusRef = useRef(appliedFocus);
@@ -165,6 +181,30 @@ export default function App() {
   );
 
   const degrees = useMemo(() => (bundle ? vertexDegrees(bundle) : null), [bundle]);
+
+  const analysisSeedOrder = useMemo(
+    () => (bundle ? appliedSeedNamesOrdered(bundle, appliedSeedsText) : []),
+    [bundle, appliedSeedsText],
+  );
+
+  useEffect(() => {
+    if (webGpuError || !bundle) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (analysisKeyboardGuard(e)) return;
+      if (e.code === "KeyR") {
+        e.preventDefault();
+        diskViewRef.current?.resetView();
+      } else if (e.code === "KeyF") {
+        e.preventDefault();
+        diskViewRef.current?.fitSubgraphToView();
+      } else if (e.code === "KeyA") {
+        e.preventDefault();
+        setAnalysisOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [webGpuError, bundle]);
 
   const onApplySeeds = useCallback(() => {
     setFormErr(null);
@@ -286,7 +326,10 @@ export default function App() {
   const focusUiKey = focusAnimTarget?.trim() || appliedFocus.trim();
 
   return (
-    <div className="shell">
+    <div
+      className="shell"
+      title="Shortcuts: R reset view, F fit subgraph, A analysis."
+    >
       <DiskView
         ref={diskViewRef}
         scene={scene}
@@ -302,9 +345,20 @@ export default function App() {
         nodeInteractionRef={nodeInteractionRef}
       />
 
+      <AnalysisFloater
+        open={analysisOpen}
+        onClose={() => setAnalysisOpen(false)}
+        bundle={bundle}
+        degrees={degrees}
+        seedNamesOrdered={analysisSeedOrder}
+      />
+
       <details className="advancedPanel">
         <summary>Advanced</summary>
         <div className="advancedInner">
+          <p className="advancedShortcutsHint">
+            Shortcuts: <kbd>R</kbd> reset view, <kbd>F</kbd> fit subgraph, <kbd>A</kbd> analysis.
+          </p>
           <label
             className="seedLabelsCb"
             title="When on, green/red node markers shrink partially with Euclidean zoom (50% of full inverse scale) so they grow less on screen. Off = world size unchanged when zooming."
