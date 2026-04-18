@@ -1,0 +1,117 @@
+
+===========================================================================================
+D-Mercator: accurate embeddings of graphs in the SD space
+version: 0.9
+started on: 2026/04/18 0:28 UTC
+edgelist filename: /data/edges_GC.edge
+seed: 1776472129
+
+Loading edgelist......................................................................done.
+
+Checking number of connected components...............................................done.
+
+Analyzing degrees.....................................................................done.
+
+Computing local clustering............................................................done.
+
+Ordering vertices.....................................................................done.
+
+Properties of the graph
+    Nb vertices:                    17090
+    Nb edges:                       298866
+    Average degree:                 34.98
+    Minimum degree:                 1
+    Maximum degree:                 1523
+    Nb of degree class:             349
+    Average clustering:             0.1026
+
+Inferring parameters...
+           beta      avg. clustering 
+         2.1838               0.1406 
+         2.0919               0.1196 
+         2.0460               0.1052 
+                       ...............................................................done.
+
+Inferred ensemble (random positions)
+    Average degree:                 34.9755
+    Minimum degree:                 1
+    Maximum degree:                 1523
+    Average clustering:             0.1052
+    Parameters
+      - beta:                       2.0460
+      - mu:                           0.0002
+      - radius_S^D (R):               36.8779
+
+Finding initial positions/ordering...
+    Building the weights matrix... Matrix built.
+
+    Computing eigenvectors using Spectra parameter ncv = 12... Convergence reached.
+Refining the positions...
+    ...of vertices       [1,854]......done in 987.7172 seconds (854/854 changed position)
+    ...of vertices    [855,1708]......done in 988.4180 seconds (848/854 changed position)
+    ...of vertices   [1709,2562]......done in 989.9753 seconds (846/854 changed position)
+    ...of vertices   [2563,3416]......done in 993.9141 seconds (850/854 changed position)
+    ...of vertices   [3417,4270]......done in 979.6719 seconds (851/854 changed position)
+    ...of vertices   [4271,5124]......done in 979.5430 seconds (842/854 changed position)
+    ...of vertices   [5125,5978]......done in 982.9917 seconds (838/854 changed position)
+    ...of vertices   [5979,6832]......done in 981.9268 seconds (833/854 changed position)
+    ...of vertices   [6833,7686]......done in 982.9873 seconds (834/854 changed position)
+    ...of vertices   [7687,8540]......done in 982.8203 seconds (832/854 changed position)
+    ...of vertices   [8541,9394]......done in 982.9395 seconds (830/854 changed position)
+    ...of vertices  [9395,10248]......done in 985.9248 seconds (815/854 changed position)
+    ...of vertices [10249,11102]......done in 983.9971 seconds (804/854 changed position)
+    ...of vertices [11103,11956]......done in 991.0869 seconds (798/854 changed position)
+    ...of vertices [11957,12810]......done in 992.6377 seconds (797/854 changed position)
+    ...of vertices [12811,13664]......done in 992.4453 seconds (783/854 changed position)
+    ...of vertices [13665,14518]......done in 991.3438 seconds (793/854 changed position)
+    ...of vertices [14519,15372]......done in 997.1152 seconds (806/854 changed position)
+    ...of vertices [15373,16226]......done in 996.1562 seconds (798/854 changed position)
+    ...of vertices [16227,17080]......done in 999.1602 seconds (771/854 changed position)
+    ...of vertices [17081,17090]......done in 11.5742 seconds (  8/ 10 changed position)
+                         .............................................................done.
+
+Updating values of kappa based on inferred positions...
+    Convergence reached after 160 iterations.
+                                                       ...............................done.
+
+    => Inferred coordinates saved to /data/edges_GC.inf_coord
+
+Internal parameters and options
+    ALREADY_INFERRED_PARAMETERS_FILENAME   
+    BETA_ABS_MAX                           25
+    BETA_ABS_MIN                           1.01
+    CHARACTERIZATION_MODE                  false
+    CHARACTERIZATION_NB_GRAPHS             100
+    CLEAN_RAW_OUTPUT_MODE                  false
+    CUSTOM_BETA                            false
+    CUSTOM_CHARACTERIZATION_NB_GRAPHS      false
+    CUSTOM_INFERRED_COORDINATES            false
+    CUSTOM_OUTPUT_ROOTNAME_MODE            false
+    CUSTOM_SEED                            false
+    EDGELIST_FILENAME:                     /data/edges_GC.edge
+    EXP_CLUST_NB_INTEGRATION_MC_STEPS      600
+    EXP_DIST_NB_INTEGRATION_STEPS          1000
+    KAPPA_MAX_NB_ITER_CONV                 500
+    KAPPA_POST_INFERENCE_MODE              true
+    MAXIMIZATION_MODE                      true
+    MIN_NB_ANGLES_TO_TRY                   100
+    NUMERICAL_CONVERGENCE_THRESHOLD_1      0.01
+    NUMERICAL_CONVERGENCE_THRESHOLD_2      5e-05
+    NUMERICAL_CONVERGENCE_THRESHOLD_3      0.5
+    NUMERICAL_ZERO                         1e-10
+    QUIET_MODE                             false
+    REFINE_MODE                            false
+    ROOTNAME_OUTPUT:                       /data/edges_GC
+    SEED                                   1776472129
+    VALIDATION_MODE                        false
+    VERBOSE_MODE                           false
+    VERSION                                0.9
+
+Ended on: 2026/04/18 6:24 UTC
+Elapsed CPU time (embedding):            22254.1621 seconds
+    initialization:                          3.6202 seconds
+    parameters inference:                 1532.7540 seconds
+    initial positions:                      49.8536 seconds
+    refining positions:                  19774.3484 seconds
+    adjusting kappas:                      893.5859 seconds
+===========================================================================================

@@ -1,0 +1,11 @@
+{
+  "run_subdir": "d2",
+  "default_focus": "STAC3",
+  "default_seeds": [
+    "CATSPER1",
+    "STAC3",
+    "CACNB3",
+    "CACNA1C",
+    "CACNA1S"
+  ]
+}
