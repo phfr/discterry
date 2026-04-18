@@ -72,6 +72,8 @@ export type DiskViewHandle = {
   fitSubgraphToView: () => void;
   /** Push GPU buffers without waiting for React `scene` prop (focus animation frames). */
   applySceneBuffers: (buf: SceneBuffers | null) => void;
+  /** Multiplier 0–1 on orange path overlay opacity (base 0.92). No-op if no path line mesh yet. */
+  setPathOverlayOpacityMultiplier: (mult: number) => void;
 };
 
 /** Filled by App: map graph index → list tooltip text; pick sets focus by vertex index. */
@@ -164,8 +166,12 @@ type ThreeCtx = {
   camera: InstanceType<typeof OrthographicCamera>;
   host: HTMLDivElement;
   lineBoth: InstanceType<typeof Mesh> | null;
+  /** Non-seed graph edges (LineSegments2); same dispose path as `lineBoth`. */
+  lineBg: InstanceType<typeof Mesh> | null;
   lineOne: InstanceType<typeof LineSegments> | null;
-  linePath: InstanceType<typeof LineSegments> | null;
+  /** Wide geodesic overlay (LineSegments2); same dispose path as `lineBoth`. */
+  linePath: InstanceType<typeof Mesh> | null;
+  pathOverlayOpacityMult: RefObject<number>;
   meshOther: InstanceType<typeof InstancedMesh> | null;
   meshSeeds: InstanceType<typeof InstancedMesh> | null;
   labelsLayer: HTMLDivElement;
@@ -178,6 +184,9 @@ type ThreeCtx = {
   raycaster: InstanceType<typeof Raycaster>;
   ndcPointer: InstanceType<typeof Vector2>;
 };
+
+/** Max opacity for orange path / tree overlay (`Line2NodeMaterial`). */
+const PATH_OVERLAY_OPACITY_BASE = 0.92;
 
 const CLICK_DRAG_PX = 6;
 /** Extra slack (screen px) for hover/click hit-testing when disk sprites are tiny. */
@@ -384,14 +393,35 @@ function applyBuffers(
   const zm = Math.max(nodeZoomMul, nodeMinMul);
   const otherR = OTHER_DISK_RADIUS * nodeSizeMul * zm;
   const seedR = SEED_DISK_RADIUS * nodeSizeMul * zm;
+  disposeLineBothWide(ctx.lineBg, scene3);
   disposeLineBothWide(ctx.lineBoth, scene3);
   disposeLineMesh(ctx.lineOne, scene3);
-  disposeLineMesh(ctx.linePath, scene3);
+  disposeLineBothWide(ctx.linePath, scene3);
   disposeInstancedMesh(ctx.meshOther, scene3);
   disposeInstancedMesh(ctx.meshSeeds, scene3);
-  ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
+  ctx.lineBg = ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
   if (!buf) return;
 
+  /* Faint non-seed edges (under seed-touching lines), then blue one-seed, then disks and red both-seed. */
+  if (buf.nLineBgVerts > 0) {
+    const bgPos = transformLinePositions(buf.lineBgPositions, v);
+    const geomBg = new LineSegmentsGeometry();
+    geomBg.setPositions(bgPos);
+    const matBg = new Line2NodeMaterial({
+      color: 0xffd4a8,
+      linewidth: 1,
+      transparent: true,
+      opacity: 0.04,
+      blending: AdditiveBlending,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const lineBg = new LineSegments2(geomBg, matBg);
+    lineBg.renderOrder = -4;
+    ctx.lineBg = lineBg;
+    scene3.add(lineBg);
+  }
   /* Blue (additive) → green points → red both-seed lines → opaque seed disks on top. */
   if (buf.nLineOneVerts > 0) {
     const linePos = transformLinePositions(buf.lineOnePositions, v);
@@ -440,17 +470,19 @@ function applyBuffers(
   const ov = overlayRef.current;
   if (ov && ov.nFloats > 0 && ov.positions.length >= ov.nFloats) {
     const pathPos = transformLinePositions(ov.positions.subarray(0, ov.nFloats), v);
-    const gPath = new BufferGeometry();
-    gPath.setAttribute("position", new Float32BufferAttribute(pathPos, 3));
-    const mPath = new LineBasicMaterial({
+    const geomPath = new LineSegmentsGeometry();
+    geomPath.setPositions(pathPos);
+    const pathMult = Math.max(0, Math.min(1, ctx.pathOverlayOpacityMult.current));
+    const mPath = new Line2NodeMaterial({
       color: 0xff9922,
+      linewidth: 4,
       transparent: true,
-      opacity: 0.92,
+      opacity: PATH_OVERLAY_OPACITY_BASE * pathMult,
       depthTest: true,
       depthWrite: false,
       toneMapped: false,
     });
-    const linePath = new LineSegments(gPath, mPath);
+    const linePath = new LineSegments2(geomPath, mPath);
     linePath.renderOrder = 8;
     ctx.linePath = linePath;
     scene3.add(linePath);
@@ -536,6 +568,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     nodeMinMul,
   });
   const pathOverlayRef = useRef<PathOverlayBuffer | null>(null);
+  const pathOverlayOpacityMultRef = useRef(1);
   useLayoutEffect(() => {
     pathOverlayRef.current = pathOverlay;
   }, [pathOverlay]);
@@ -624,6 +657,15 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       syncSeedLabelDom(c, buf, showLabelsRef.current);
     },
+    setPathOverlayOpacityMultiplier(mult: number) {
+      const m = Math.max(0, Math.min(1, mult));
+      pathOverlayOpacityMultRef.current = m;
+      const c = ctxRef.current;
+      const mesh = c?.linePath;
+      if (!mesh) return;
+      const mat = mesh.material as InstanceType<typeof Line2NodeMaterial>;
+      mat.opacity = PATH_OVERLAY_OPACITY_BASE * m;
+    },
   }));
 
   useEffect(() => {
@@ -676,8 +718,10 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       camera,
       host,
       lineBoth: null,
+      lineBg: null,
       lineOne: null,
       linePath: null,
+      pathOverlayOpacityMult: pathOverlayOpacityMultRef,
       meshOther: null,
       meshSeeds: null,
       labelsLayer,

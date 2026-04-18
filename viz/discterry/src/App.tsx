@@ -16,6 +16,7 @@ import {
   type SceneStats,
 } from "./model/computeScene";
 import { bundleToCSR } from "./model/graphSearch";
+import { tryBuildPrimMstOverlay } from "./model/primMstOverlay";
 import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
 import { nodeListTooltip, nodeListTooltipForIndex } from "./nodeListTooltip";
@@ -29,6 +30,9 @@ const DEFAULT_RADIAL_SCALE_MAX = 1.3;
 const DEFAULT_NODE_SIZE_MUL = 0.5;
 /** Floor for radial instance scale and for zoom-size multiplier (see DiskView). */
 const DEFAULT_NODE_MIN_MUL = 0.1;
+
+const PRIM_MST_FLASH_HOLD_MS = 2000;
+const PRIM_MST_FLASH_FADE_MS = 300;
 
 function parseSeeds(text: string): Set<string> {
   const s = new Set<string>();
@@ -62,6 +66,24 @@ function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, applied
   if (f && bundle.nameToIndex.has(f) && !set.has(f)) seeds.push(f);
   seeds.sort((a, b) => a.localeCompare(b));
   return seeds;
+}
+
+const FOCUS_SEARCH_MAX = 28;
+
+/** Case-insensitive prefix then substring; capped for UI responsiveness. */
+function filterVertexNames(vertices: readonly string[], query: string, max: number): string[] {
+  const t = query.trim().toLowerCase();
+  if (!t) return [];
+  const pref: string[] = [];
+  const sub: string[] = [];
+  for (const name of vertices) {
+    const l = name.toLowerCase();
+    if (l.startsWith(t)) pref.push(name);
+    else if (l.includes(t)) sub.push(name);
+  }
+  pref.sort((a, b) => a.localeCompare(b));
+  sub.sort((a, b) => a.localeCompare(b));
+  return [...pref, ...sub].slice(0, max);
 }
 
 /** Applied seed names in first-seen order (from applied text), bundle-valid only. */
@@ -98,6 +120,10 @@ export default function App() {
   const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [pathTreesOpen, setPathTreesOpen] = useState(false);
+  /** Shift+U: draw all graph edges; non-seed–non-seed segments are faint light orange (see DiskView). */
+  const [showAllGraphEdges, setShowAllGraphEdges] = useState(false);
+  const [focusSearch, setFocusSearch] = useState("");
+  const [focusSearchHl, setFocusSearchHl] = useState(0);
   const diskViewRef = useRef<DiskViewHandle>(null);
   const nodeInteractionRef = useRef<DiskViewNodeInteraction | null>(null);
   const appliedFocusRef = useRef(appliedFocus);
@@ -193,16 +219,48 @@ export default function App() {
   const pathOverlay =
     pathOverlayPinned && pathOverlayPinned.key === graphInteractionKey ? pathOverlayPinned.buf : null;
 
+  const primMstFlashActiveRef = useRef(false);
+  const primMstFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const primMstFadeRafRef = useRef(0);
+
+  const cancelPrimMstFadeTimers = useCallback(() => {
+    if (primMstFadeTimeoutRef.current !== null) {
+      clearTimeout(primMstFadeTimeoutRef.current);
+      primMstFadeTimeoutRef.current = null;
+    }
+    if (primMstFadeRafRef.current) {
+      cancelAnimationFrame(primMstFadeRafRef.current);
+      primMstFadeRafRef.current = 0;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    cancelPrimMstFadeTimers();
+    primMstFlashActiveRef.current = false;
+    diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+    setPathOverlayPinned(null);
+  }, [graphInteractionKey, cancelPrimMstFadeTimers]);
+
+  const handlePathOverlayChange = useCallback(
+    (b: PathOverlayBuffer | null) => {
+      cancelPrimMstFadeTimers();
+      primMstFlashActiveRef.current = false;
+      diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+      setPathOverlayPinned(b && graphInteractionKey ? { buf: b, key: graphInteractionKey } : null);
+    },
+    [graphInteractionKey, cancelPrimMstFadeTimers],
+  );
+
   const scene: SceneBuffers | null = useMemo(() => {
     if (!bundle || !appliedFocus.trim() || !z0Current) return null;
     try {
       const seeds = parseSeeds(appliedSeedsText);
       if (seeds.size === 0) return null;
-      return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode);
+      return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode, showAllGraphEdges);
     } catch {
       return null;
     }
-  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode, z0Current]);
+  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, z0Current]);
 
   const pickerNames = useMemo(
     () => (bundle ? focusPickerNames(bundle, appliedSeedsText, appliedFocus) : []),
@@ -215,6 +273,18 @@ export default function App() {
     () => (bundle ? appliedSeedNamesOrdered(bundle, appliedSeedsText) : []),
     [bundle, appliedSeedsText],
   );
+
+  const focusSearchMatches = useMemo(() => {
+    if (!bundle) return [];
+    return filterVertexNames(bundle.vertex, focusSearch, FOCUS_SEARCH_MAX);
+  }, [bundle, focusSearch]);
+
+  useLayoutEffect(() => {
+    setFocusSearchHl((i) => {
+      if (focusSearchMatches.length === 0) return 0;
+      return Math.min(i, focusSearchMatches.length - 1);
+    });
+  }, [focusSearchMatches]);
 
   useEffect(() => {
     if (webGpuError || !bundle) return;
@@ -232,11 +302,56 @@ export default function App() {
       } else if (e.code === "KeyS") {
         e.preventDefault();
         setPathTreesOpen((o) => !o);
+      } else if (e.code === "KeyU" && e.shiftKey) {
+        e.preventDefault();
+        setShowAllGraphEdges((o) => !o);
+      } else if (e.code === "KeyM") {
+        e.preventDefault();
+        if (!z0Current) return;
+        cancelPrimMstFadeTimers();
+        primMstFlashActiveRef.current = false;
+        const r = tryBuildPrimMstOverlay(bundle, z0Current, appliedSeedsText);
+        if (!r.ok) return;
+        primMstFlashActiveRef.current = true;
+        diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+        setPathOverlayPinned({ buf: r.buf, key: graphInteractionKey });
+        primMstFadeTimeoutRef.current = setTimeout(() => {
+          primMstFadeTimeoutRef.current = null;
+          if (!primMstFlashActiveRef.current) return;
+          const t0 = performance.now();
+          const tick = (now: number) => {
+            if (!primMstFlashActiveRef.current) return;
+            const u = Math.min(1, (now - t0) / PRIM_MST_FLASH_FADE_MS);
+            diskViewRef.current?.setPathOverlayOpacityMultiplier(1 - u);
+            if (u < 1) {
+              primMstFadeRafRef.current = requestAnimationFrame(tick);
+            } else {
+              primMstFadeRafRef.current = 0;
+              if (primMstFlashActiveRef.current) {
+                setPathOverlayPinned(null);
+                primMstFlashActiveRef.current = false;
+              }
+              diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+            }
+          };
+          primMstFadeRafRef.current = requestAnimationFrame(tick);
+        }, PRIM_MST_FLASH_HOLD_MS);
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [webGpuError, bundle]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      cancelPrimMstFadeTimers();
+      primMstFlashActiveRef.current = false;
+    };
+  }, [
+    webGpuError,
+    bundle,
+    z0Current,
+    appliedSeedsText,
+    graphInteractionKey,
+    cancelPrimMstFadeTimers,
+  ]);
 
   const onApplySeeds = useCallback(() => {
     setFormErr(null);
@@ -274,14 +389,6 @@ export default function App() {
       cancelAnimationFrame(focusAnimRafRef.current);
       const gen = ++focusAnimGenRef.current;
 
-      let z0Start: Complex;
-      try {
-        const fromName = appliedFocusRef.current.trim();
-        z0Start = z0AnimRef.current ?? z0FromProtein(bundle, fromName || t);
-      } catch {
-        setAppliedFocus(t);
-        return;
-      }
       let z0End: Complex;
       try {
         z0End = z0FromProtein(bundle, t);
@@ -291,6 +398,24 @@ export default function App() {
 
       const seeds = parseSeeds(appliedSeedsText);
       if (seeds.size === 0) {
+        setAppliedFocus(t);
+        return;
+      }
+
+      if (showAllGraphEdges) {
+        isFocusAnimatingRef.current = false;
+        z0AnimRef.current = null;
+        setFocusAnimTarget(null);
+        diskViewRef.current?.recenterPreservingZoom();
+        setAppliedFocus(t);
+        return;
+      }
+
+      let z0Start: Complex;
+      try {
+        const fromName = appliedFocusRef.current.trim();
+        z0Start = z0AnimRef.current ?? z0FromProtein(bundle, fromName || t);
+      } catch {
         setAppliedFocus(t);
         return;
       }
@@ -316,7 +441,7 @@ export default function App() {
         z0AnimRef.current = z0;
         let buf: SceneBuffers | null = null;
         try {
-          buf = computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode);
+          buf = computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode, showAllGraphEdges);
         } catch {
           focusAnimGenRef.current += 1;
           isFocusAnimatingRef.current = false;
@@ -337,7 +462,7 @@ export default function App() {
       };
       focusAnimRafRef.current = requestAnimationFrame(tick);
     },
-    [bundle, appliedSeedsText, rimCullEps, nonSeedShowMode, webGpuError],
+    [bundle, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, webGpuError],
   );
 
   useLayoutEffect(() => {
@@ -360,7 +485,6 @@ export default function App() {
   return (
     <div
       className="shell"
-      title="Shortcuts: R reset view, F fit subgraph, A analysis, S path/trees."
     >
       <DiskView
         ref={diskViewRef}
@@ -396,18 +520,12 @@ export default function App() {
         pickerNames={pickerNames}
         appliedFocus={appliedFocus}
         appliedSeedsText={appliedSeedsText}
-        onPathOverlayChange={(b) =>
-          setPathOverlayPinned(b && graphInteractionKey ? { buf: b, key: graphInteractionKey } : null)
-        }
+        onPathOverlayChange={handlePathOverlayChange}
       />
 
       <details className="advancedPanel">
         <summary>Advanced</summary>
         <div className="advancedInner">
-          <p className="advancedShortcutsHint">
-            Shortcuts: <kbd>R</kbd> reset view, <kbd>F</kbd> fit subgraph, <kbd>A</kbd> analysis,{" "}
-            <kbd>S</kbd> path/trees.
-          </p>
           <label
             className="seedLabelsCb"
             title="When on, green/red node markers shrink partially with Euclidean zoom (50% of full inverse scale) so they grow less on screen. Off = world size unchanged when zooming."
@@ -594,6 +712,75 @@ export default function App() {
             );
           })}
         </ul>
+        {bundle ? (
+          <div className="focusSearchWrap">
+            <div className="focusSearchRow">
+              <label className="focusSearchLabel" htmlFor="focusSearchInput">
+                Search
+              </label>
+              <div className="focusSearchInputRow">
+                <input
+                  id="focusSearchInput"
+                  className="focusSearchInput"
+                  type="text"
+                  value={focusSearch}
+                  onChange={(e) => setFocusSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      if (focusSearchMatches.length === 0) return;
+                      setFocusSearchHl((h) => Math.min(h + 1, focusSearchMatches.length - 1));
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setFocusSearchHl((h) => Math.max(h - 1, 0));
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      const exact = focusSearch.trim();
+                      if (focusSearchMatches.length > 0) {
+                        onPickFocus(focusSearchMatches[focusSearchHl]!);
+                        setFocusSearch("");
+                      } else if (exact && bundle.nameToIndex.has(exact)) {
+                        onPickFocus(exact);
+                        setFocusSearch("");
+                      }
+                    } else if (e.key === "Escape") {
+                      setFocusSearch("");
+                    }
+                  }}
+                  placeholder="Type gene… Enter to focus"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-autocomplete="list"
+                  aria-controls="focusSearchList"
+                  aria-expanded={focusSearch.trim().length > 0 && focusSearchMatches.length > 0}
+                  disabled={!!webGpuError}
+                />
+                {focusSearch.trim() && focusSearchMatches.length > 0 ? (
+                  <ul id="focusSearchList" className="focusSearchList" role="listbox">
+                    {focusSearchMatches.map((name, i) => (
+                      <li key={name} role="presentation">
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={i === focusSearchHl}
+                          className={i === focusSearchHl ? "focusSearchItem focusSearchItemOn" : "focusSearchItem"}
+                          onMouseEnter={() => setFocusSearchHl(i)}
+                          onMouseDown={(ev) => ev.preventDefault()}
+                          onClick={() => {
+                            onPickFocus(name);
+                            setFocusSearch("");
+                          }}
+                        >
+                          {name}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="statusBox" aria-live="polite">
@@ -621,6 +808,24 @@ export default function App() {
               <span className="statusK">edges drawn</span>
               <span className="statusV">{stats.edgesDrawn}</span>
             </div>
+            {stats.edgesBackgroundPool > 0 ? (
+              <div
+                className="statusRow sub"
+                title={
+                  stats.edgesBackgroundPool > stats.edgesBackgroundSubmitted
+                    ? `Capped at ${stats.edgesBackgroundSubmitted} of ${stats.edgesBackgroundPool} non-seed edges so the UI stays responsive. Shift+U to toggle.`
+                    : "Non-seed–non-seed edges (Shift+U to toggle)."
+                }
+              >
+                <span className="statusK">edges non-seed</span>
+                <span className="statusV">
+                  {stats.edgesBackgroundDrawn}
+                  {stats.edgesBackgroundPool > stats.edgesBackgroundSubmitted
+                    ? ` / ${stats.edgesBackgroundPool}`
+                    : ""}
+                </span>
+              </div>
+            ) : null}
             <div className="statusRow">
               <span className="statusK">edges seed</span>
               <span className="statusV">{stats.edgesSeedTouching}</span>

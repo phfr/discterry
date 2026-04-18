@@ -10,6 +10,12 @@ export const R_SAFE = 0.999999;
 /** Samples per Poincaré geodesic polyline. */
 export const GEODESIC_N = 96;
 
+/**
+ * Max non-seed–non-seed edges drawn when “show all edges” (Shift+U) is on.
+ * Full graphs can have 500k+ such edges; without a cap the main thread allocates ~1GB+ and hangs.
+ */
+export const BACKGROUND_NONSEED_EDGE_MAX = 25_000;
+
 /** Skip drawing edges if an endpoint has |z| >= this in the original disk (notebook uses 0.999). */
 export const EDGE_Z_BOUND = 0.999;
 

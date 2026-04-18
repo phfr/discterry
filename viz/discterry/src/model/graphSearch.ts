@@ -130,7 +130,8 @@ export function poincareDiskDistance(wx0: number, wy0: number, wx1: number, wy1:
   return Math.acosh(1 + (2 * chord2) / den);
 }
 
-const PRIM_MAX_SEEDS = 48;
+/** Upper bound on seed count for Prim MST overlay (pairwise O(k²) work). */
+export const PRIM_MAX_SEEDS = 48;
 
 /** Prim MST on seed indices using pairwise hyperbolic distance in W at current embedding. */
 export function primHyperbolicSeedEdges(

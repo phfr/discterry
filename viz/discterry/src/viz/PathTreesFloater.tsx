@@ -1,30 +1,21 @@
 import { useMemo, useRef, useState } from "react";
 import type { GraphBundle } from "../data/loadBundle";
 import type { Complex } from "../math/mobius";
-import { mobiusDiskArrays } from "../math/mobius";
-import type { GraphCSR } from "../model/graphSearch";
 import {
+  PRIM_MAX_SEEDS,
   bfsParentTree,
   bfsShortestPath,
   collectFilteredBfsTreeEdges,
-  primHyperbolicSeedEdges,
+  type GraphCSR,
 } from "../model/graphSearch";
+import { tryBuildPrimMstOverlay } from "../model/primMstOverlay";
 import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
 import { buildPathOverlayFromEdges, buildPathOverlayFromVertexPath } from "../model/pathOverlayBuffer";
 import type { SceneBuffers } from "../model/computeScene";
 
-type TabId = "concepts" | "graph" | "geometry";
+type TabId = "graph" | "geometry";
 
 const BFS_TREE_MAX_DRAW_EDGES = 8000;
-
-function parseSeeds(text: string): Set<string> {
-  const s = new Set<string>();
-  for (const part of text.split(/\s+/)) {
-    const t = part.trim();
-    if (t) s.add(t);
-  }
-  return s;
-}
 
 type Props = {
   open: boolean;
@@ -51,7 +42,7 @@ export function PathTreesFloater({
   appliedSeedsText,
   onPathOverlayChange,
 }: Props) {
-  const [tab, setTab] = useState<TabId>("concepts");
+  const [tab, setTab] = useState<TabId>("graph");
   const [pos, setPos] = useState({ left: 360, bottom: 24 });
   const dragRef = useRef<{ sx: number; sy: number; l0: number; b0: number } | null>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -76,15 +67,6 @@ export function PathTreesFloater({
     for (let i = 0; i < scene.otherGraphIndex.length; i++) s.add(scene.otherGraphIndex[i]!);
     return s;
   }, [scene]);
-
-  const wxWy = useMemo(() => {
-    if (!bundle || !z0) return null;
-    const n = bundle.vertex.length;
-    const wx = new Float32Array(n);
-    const wy = new Float32Array(n);
-    mobiusDiskArrays(bundle.x, bundle.y, z0, wx, wy, n);
-    return { wx, wy };
-  }, [bundle, z0]);
 
   const clearOverlay = () => {
     onPathOverlayChange(null);
@@ -149,39 +131,24 @@ export function PathTreesFloater({
 
   const showPrimMst = () => {
     setMsg(null);
-    if (!bundle || !z0 || !wxWy) {
+    if (!bundle || !z0) {
       setMsg("Embedding not ready.");
       return;
     }
-    const seeds = parseSeeds(appliedSeedsText);
-    const idx: number[] = [];
-    const seen = new Set<number>();
-    for (const name of seeds) {
-      const j = bundle.nameToIndex.get(name);
-      if (j !== undefined && !seen.has(j)) {
-        seen.add(j);
-        idx.push(j);
+    const r = tryBuildPrimMstOverlay(bundle, z0, appliedSeedsText);
+    if (!r.ok) {
+      if (r.reason === "need_two_seeds") {
+        setMsg("Need ≥2 applied seeds for Prim MST.");
+      } else if (r.reason === "too_many_seeds") {
+        setMsg(`Too many seeds (>${PRIM_MAX_SEEDS}); reduce seed list for Prim.`);
+      } else {
+        setMsg("MST edges skipped by boundary clip.");
       }
-    }
-    if (idx.length < 2) {
-      setMsg("Need ≥2 applied seeds for Prim MST.");
       onPathOverlayChange(null);
       return;
     }
-    const { edges, skipped } = primHyperbolicSeedEdges(wxWy.wx, wxWy.wy, idx);
-    if (skipped) {
-      setMsg(`Too many seeds (>${48}); reduce seed list for Prim.`);
-      onPathOverlayChange(null);
-      return;
-    }
-    const buf = buildPathOverlayFromEdges(bundle, z0, edges);
-    if (!buf) {
-      setMsg("MST edges skipped by boundary clip.");
-      onPathOverlayChange(null);
-      return;
-    }
-    onPathOverlayChange(buf);
-    setMsg(`Prim MST on ${idx.length} seeds (hyperbolic distance in W at current focus).`);
+    onPathOverlayChange(r.buf);
+    setMsg(`Prim MST on ${r.seedCount} seeds (hyperbolic distance in W at current focus).`);
   };
 
   const onHeaderPointerDown = (e: React.PointerEvent) => {
@@ -243,15 +210,6 @@ export function PathTreesFloater({
         <button
           type="button"
           role="tab"
-          aria-selected={tab === "concepts"}
-          className={tab === "concepts" ? "analysisTab analysisTabOn" : "analysisTab"}
-          onClick={() => setTab("concepts")}
-        >
-          Concepts
-        </button>
-        <button
-          type="button"
-          role="tab"
           aria-selected={tab === "graph"}
           className={tab === "graph" ? "analysisTab analysisTabOn" : "analysisTab"}
           onClick={() => setTab("graph")}
@@ -269,24 +227,6 @@ export function PathTreesFloater({
         </button>
       </div>
       <div className="pathTreesFloaterBody">
-        {tab === "concepts" ? (
-          <div className="pathTreesConcepts">
-            <p>
-              <strong>Graph shortest path</strong> uses <strong>unweighted</strong> PPI edges (BFS). The orange
-              overlay draws each graph hop as a <strong>Poincaré geodesic</strong> in the current focus map—the same
-              geometric connector as seed edges, not a different notion of “shortest” in hyperbolic space.
-            </p>
-            <p>
-              A <strong>hyperbolic geodesic between two positions</strong> is the metric shortest path in the disk
-              model; it need not follow PPI edges.
-            </p>
-            <p>
-              A <strong>“geodesic tree”</strong> in navigation terms is often a spanning tree whose edges are drawn as
-              geodesics (e.g. Prim MST among seeds by hyperbolic distance in <strong>W</strong> at the current focus)—
-              a geometric object on a small set of vertices, not the same as the PPI BFS tree on the full graph.
-            </p>
-          </div>
-        ) : null}
         {tab === "graph" ? (
           <div className="pathTreesControls">
             <label className="pathTreesLabel">

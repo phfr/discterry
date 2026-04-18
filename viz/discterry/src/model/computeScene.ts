@@ -1,4 +1,4 @@
-import { GEODESIC_N } from "../math/constants";
+import { BACKGROUND_NONSEED_EDGE_MAX, GEODESIC_N } from "../math/constants";
 import type { Complex } from "../math/mobius";
 import { mobiusDiskArrays } from "../math/mobius";
 import type { GraphBundle } from "../data/loadBundle";
@@ -30,11 +30,19 @@ export type SceneStats = {
    * (notebook clip — not the same as rim culling).
    */
   edgesSkippedBoundary: number;
+  /** Non-seed–non-seed edges actually drawn (when overlay enabled); 0 otherwise. */
+  edgesBackgroundDrawn: number;
+  /** When overlay on: count of non-seed–non-seed edges in the graph (before sampling). */
+  edgesBackgroundPool: number;
+  /** Geodesics built for this frame (after sampling cap, before per-edge clip). */
+  edgesBackgroundSubmitted: number;
 };
 
 export type SceneBuffers = {
   lineOnePositions: Float32Array;
   lineBothPositions: Float32Array;
+  /** Geodesics for edges with neither endpoint a seed (optional overlay). */
+  lineBgPositions: Float32Array;
   pointsOther: Float32Array;
   pointsSeed: Float32Array;
   /** Graph vertex index for each `pointsOther` instance (green), same order as triples. */
@@ -45,6 +53,7 @@ export type SceneBuffers = {
   seedLabels: string[];
   nLineOneVerts: number;
   nLineBothVerts: number;
+  nLineBgVerts: number;
   nPointsOther: number;
   nPointsSeed: number;
   stats: SceneStats;
@@ -56,6 +65,7 @@ export function computeScene(
   seedNames: Set<string>,
   rimCullEps: number,
   nonSeedShowMode: NonSeedShowMode,
+  drawAllNonSeedEdges: boolean,
 ): SceneBuffers {
   const { x: zx, y: zy, src, dst, nameToIndex } = bundle;
   const n = zx.length;
@@ -132,12 +142,46 @@ export function computeScene(
     if (oo.i > before) drawnOne++;
   }
 
+  const none: number[] = [];
+  let bgPool = 0;
+  let bgSubmitted = 0;
+  if (drawAllNonSeedEdges) {
+    for (let ei = 0; ei < src.length; ei++) {
+      const a = src[ei]!;
+      const b = dst[ei]!;
+      if (isSeed[a] === 0 && isSeed[b] === 0) bgPool++;
+    }
+    if (bgPool > 0) {
+      const toTake = Math.min(bgPool, BACKGROUND_NONSEED_EDGE_MAX);
+      let k = -1;
+      for (let ei = 0; ei < src.length; ei++) {
+        const a = src[ei]!;
+        const b = dst[ei]!;
+        if (isSeed[a] !== 0 || isSeed[b] !== 0) continue;
+        k++;
+        if (Math.floor(((k + 1) * toTake) / bgPool) > Math.floor((k * toTake) / bgPool)) {
+          none.push(ei);
+        }
+      }
+    }
+    bgSubmitted = none.length;
+  }
+  const lineBgPositions = new Float32Array(none.length * vertsPerEdge);
+  const ogb = { i: 0 };
+  let drawnBg = 0;
+  for (const ei of none) {
+    const before = ogb.i;
+    appendGeodesicLineSegments(zx, zy, z0, src[ei]!, dst[ei]!, lineBgPositions, ogb);
+    if (ogb.i > before) drawnBg++;
+  }
+
   const nodesRendered = otherPts.length / 3 + seedPts.length / 3;
   const edgesDrawn = drawnBoth + drawnOne;
 
   return {
     lineBothPositions: lineBothPositions.subarray(0, ob.i),
     lineOnePositions: lineOnePositions.subarray(0, oo.i),
+    lineBgPositions: lineBgPositions.subarray(0, ogb.i),
     pointsOther: Float32Array.from(otherPts),
     pointsSeed: Float32Array.from(seedPts),
     otherGraphIndex: Int32Array.from(otherIdx),
@@ -145,6 +189,7 @@ export function computeScene(
     seedLabels,
     nLineBothVerts: ob.i,
     nLineOneVerts: oo.i,
+    nLineBgVerts: ogb.i,
     nPointsOther: otherPts.length / 3,
     nPointsSeed: seedPts.length / 3,
     stats: {
@@ -156,6 +201,9 @@ export function computeScene(
       edgesSeedTouching: edgesTouching,
       edgesDrawn,
       edgesSkippedBoundary: edgesTouching - edgesDrawn,
+      edgesBackgroundDrawn: drawnBg,
+      edgesBackgroundPool: drawAllNonSeedEdges ? bgPool : 0,
+      edgesBackgroundSubmitted: drawAllNonSeedEdges ? bgSubmitted : 0,
     },
   };
 }
