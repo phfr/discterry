@@ -5,6 +5,52 @@
   background: #0e0e10;
 }
 
+.advancedPanel {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 20;
+  max-width: min(280px, 50vw);
+  padding: 6px 10px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  color: #b4b4bc;
+}
+
+.advancedPanel > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #d0d0d8;
+  list-style: none;
+  user-select: none;
+}
+
+.advancedPanel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.advancedPanel > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 0.12s ease;
+}
+
+.advancedPanel[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.advancedPanel .advancedInner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 .floatPanel {
   position: fixed;
   top: 10px;

@@ -74,6 +74,7 @@ export default function App() {
   const [rimCullEps, setRimCullEps] = useState(RIM_CULL_EPS);
   const [showSeedLabels, setShowSeedLabels] = useState(true);
   const [showCrosshair, setShowCrosshair] = useState(false);
+  const [centerWeightedSizes, setCenterWeightedSizes] = useState(false);
 
   const webGpuError = useMemo(
     () => (webGpuSupported() ? null : "WebGPU required"),
@@ -159,7 +160,38 @@ export default function App() {
         webGpuError={webGpuError}
         showSeedLabels={showSeedLabels}
         showCrosshair={showCrosshair}
+        centerWeightedSizes={centerWeightedSizes}
       />
+
+      <details className="advancedPanel">
+        <summary>Advanced</summary>
+        <div className="advancedInner">
+          <label className="seedLabelsCb">
+            <input
+              type="checkbox"
+              checked={showSeedLabels}
+              onChange={(e) => setShowSeedLabels(e.target.checked)}
+            />
+            <span>Show seed labels</span>
+          </label>
+          <label className="seedLabelsCb">
+            <input
+              type="checkbox"
+              checked={showCrosshair}
+              onChange={(e) => setShowCrosshair(e.target.checked)}
+            />
+            <span>Show crosshair</span>
+          </label>
+          <label className="seedLabelsCb" title="Larger near disk center (after focus map); same rule for green and red nodes.">
+            <input
+              type="checkbox"
+              checked={centerWeightedSizes}
+              onChange={(e) => setCenterWeightedSizes(e.target.checked)}
+            />
+            <span>Size nodes by distance to center</span>
+          </label>
+        </div>
+      </details>
 
       <div className="floatPanel">
         {loadErr ? <div className="errLine">{loadErr}</div> : null}
@@ -175,22 +207,6 @@ export default function App() {
             aria-valuetext={`rimcull ${rimCullEps.toFixed(4)}`}
           />
           <span className="rimSliderVal">{rimCullEps.toFixed(4)}</span>
-        </label>
-        <label className="seedLabelsCb">
-          <input
-            type="checkbox"
-            checked={showSeedLabels}
-            onChange={(e) => setShowSeedLabels(e.target.checked)}
-          />
-          <span>Show seed labels</span>
-        </label>
-        <label className="seedLabelsCb">
-          <input
-            type="checkbox"
-            checked={showCrosshair}
-            onChange={(e) => setShowCrosshair(e.target.checked)}
-          />
-          <span>Show crosshair</span>
         </label>
         <textarea
           className="seedsTa"
