@@ -711,9 +711,11 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     };
 
     const resize = () => {
-      const w = host.clientWidth;
-      const h = host.clientHeight || w;
-      renderer.setSize(w, h, false);
+      /* Logical size must match layout box; `updateStyle: true` sets canvas CSS — required on Safari/macOS
+       * when DPR > 1; `false` leaves default canvas size and the bitmap appears cropped (often “top-left quarter”). */
+      const w = Math.max(1, Math.floor(host.clientWidth));
+      const h = Math.max(1, Math.floor(host.clientHeight || host.clientWidth));
+      renderer.setSize(w, h, true);
       updateOrthographicCamera(camera, diskViewTransformRef.current);
     };
 
@@ -851,8 +853,18 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         host.appendChild(renderer.domElement);
         host.appendChild(labelsLayer);
         host.appendChild(nodeTipEl);
+        renderer.domElement.style.display = "block";
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         resize();
+        /* Host may still be 0×0 before flex/layout settles (Coolify, Safari); resize again after paint. */
+        requestAnimationFrame(() => {
+          if (!disposed) resize();
+        });
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (!disposed) resize();
+          });
+        });
         const el = renderer.domElement;
         window.addEventListener("keydown", onWindowKeyDown);
         window.addEventListener("keyup", onWindowKeyUp);
