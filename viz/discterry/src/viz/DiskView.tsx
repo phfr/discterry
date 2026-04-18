@@ -29,6 +29,7 @@ import {
 } from "three/webgpu";
 import { LineSegments2 } from "three/addons/lines/webgpu/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
 import type { SceneBuffers } from "../model/computeScene";
 import {
   applyMobiusToW,
@@ -143,6 +144,8 @@ export type DiskDisplaySizing = {
 
 type Props = {
   scene: SceneBuffers | null;
+  /** Optional graph-path / tree overlay (W-plane geodesics; same transform as seed edges). */
+  pathOverlay: PathOverlayBuffer | null;
   webGpuError: string | null;
   showSeedLabels: boolean;
   showCrosshair: boolean;
@@ -162,6 +165,7 @@ type ThreeCtx = {
   host: HTMLDivElement;
   lineBoth: InstanceType<typeof Mesh> | null;
   lineOne: InstanceType<typeof LineSegments> | null;
+  linePath: InstanceType<typeof LineSegments> | null;
   meshOther: InstanceType<typeof InstancedMesh> | null;
   meshSeeds: InstanceType<typeof InstancedMesh> | null;
   labelsLayer: HTMLDivElement;
@@ -362,6 +366,7 @@ function applyBuffers(
   buf: SceneBuffers | null,
   sizingRef: RefObject<DiskDisplaySizing>,
   viewRef: RefObject<DiskViewTransform>,
+  overlayRef: RefObject<PathOverlayBuffer | null>,
 ) {
   const { scene3 } = ctx;
   const {
@@ -381,9 +386,10 @@ function applyBuffers(
   const seedR = SEED_DISK_RADIUS * nodeSizeMul * zm;
   disposeLineBothWide(ctx.lineBoth, scene3);
   disposeLineMesh(ctx.lineOne, scene3);
+  disposeLineMesh(ctx.linePath, scene3);
   disposeInstancedMesh(ctx.meshOther, scene3);
   disposeInstancedMesh(ctx.meshSeeds, scene3);
-  ctx.lineBoth = ctx.lineOne = ctx.meshOther = ctx.meshSeeds = null;
+  ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
   if (!buf) return;
 
   /* Blue (additive) → green points → red both-seed lines → opaque seed disks on top. */
@@ -430,6 +436,24 @@ function applyBuffers(
     mesh.frustumCulled = false;
     ctx.meshOther = mesh;
     scene3.add(mesh);
+  }
+  const ov = overlayRef.current;
+  if (ov && ov.nFloats > 0 && ov.positions.length >= ov.nFloats) {
+    const pathPos = transformLinePositions(ov.positions.subarray(0, ov.nFloats), v);
+    const gPath = new BufferGeometry();
+    gPath.setAttribute("position", new Float32BufferAttribute(pathPos, 3));
+    const mPath = new LineBasicMaterial({
+      color: 0xff9922,
+      transparent: true,
+      opacity: 0.92,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const linePath = new LineSegments(gPath, mPath);
+    linePath.renderOrder = 8;
+    ctx.linePath = linePath;
+    scene3.add(linePath);
   }
   if (buf.nLineBothVerts > 0) {
     const bothPos = transformLinePositions(buf.lineBothPositions, v);
@@ -483,6 +507,7 @@ function applyBuffers(
 export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
   {
     scene,
+    pathOverlay,
     webGpuError,
     showSeedLabels,
     showCrosshair,
@@ -510,6 +535,10 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     compensateZoomNodes,
     nodeMinMul,
   });
+  const pathOverlayRef = useRef<PathOverlayBuffer | null>(null);
+  useLayoutEffect(() => {
+    pathOverlayRef.current = pathOverlay;
+  }, [pathOverlay]);
   useLayoutEffect(() => {
     sceneRef.current = scene;
   }, [scene]);
@@ -536,7 +565,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const c = ctxRef.current;
       if (c) {
         updateOrthographicCamera(c.camera, diskViewTransformRef.current);
-        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       }
     },
     recenterPreservingZoom() {
@@ -547,7 +576,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const c = ctxRef.current;
       if (c) {
         updateOrthographicCamera(c.camera, tr);
-        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       }
     },
     fitSubgraphToView() {
@@ -586,13 +615,13 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       tr.panX = cx;
       tr.panY = cy;
       updateOrthographicCamera(c.camera, tr);
-      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef);
+      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
     },
     applySceneBuffers(buf: SceneBuffers | null) {
       sceneRef.current = buf;
       const c = ctxRef.current;
       if (!c) return;
-      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef);
+      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       syncSeedLabelDom(c, buf, showLabelsRef.current);
     },
   }));
@@ -648,6 +677,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       host,
       lineBoth: null,
       lineOne: null,
+      linePath: null,
       meshOther: null,
       meshSeeds: null,
       labelsLayer,
@@ -724,11 +754,11 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
           RIM_GAMMA_MAX,
           Math.max(RIM_GAMMA_MIN, tr.rimPreservingGamma * Math.exp(-e.deltaY * RIM_WHEEL_SENS)),
         );
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       } else {
         tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
         updateOrthographicCamera(camera, tr);
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       }
     };
 
@@ -761,7 +791,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         const worldSpan = (2 * BASE_HALF_EXTENT) / tr.zoom;
         if (shiftHeld) {
           tr.mobius = incrementMobiusFromDrag(tr.mobius, dx, dy, cw, ch);
-          applyBuffers(ctx, buf, diskDisplayRef, diskViewTransformRef);
+          applyBuffers(ctx, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
         } else {
           tr.panX -= (dx / cw) * worldSpan;
           tr.panY += (dy / ch) * worldSpan;
@@ -833,7 +863,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         el.addEventListener("pointerup", onPointerUp);
         el.addEventListener("pointercancel", onPointerUp);
         el.addEventListener("pointerleave", onPointerLeave);
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
         syncSeedLabelDom(ctx, sceneRef.current, showLabelsRef.current);
         loop();
       } catch (e) {
@@ -860,7 +890,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("pointercancel", onPointerUp);
       renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
-      applyBuffers(ctx, null, diskDisplayRef, diskViewTransformRef);
+      applyBuffers(ctx, null, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
       syncSeedLabelDom(ctx, null, false);
       renderer.dispose();
       ctxRef.current = null;
@@ -872,10 +902,11 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
     /* Keep Euclidean pan/zoom and viewer Möbius across focus/scene buffer updates; use Reset view to clear. */
-    applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef);
+    applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef, pathOverlayRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
   }, [
     scene,
+    pathOverlay,
     showSeedLabels,
     centerWeightedSizes,
     radialScaleMin,

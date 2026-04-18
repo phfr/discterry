@@ -15,11 +15,14 @@ import {
   type SceneBuffers,
   type SceneStats,
 } from "./model/computeScene";
+import { bundleToCSR } from "./model/graphSearch";
+import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
 import { nodeListTooltip, nodeListTooltipForIndex } from "./nodeListTooltip";
 import { analysisKeyboardGuard } from "./analysisKeyboardGuard";
 import { AnalysisFloater } from "./viz/AnalysisFloater";
 import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
+import { PathTreesFloater } from "./viz/PathTreesFloater";
 
 const DEFAULT_RADIAL_SCALE_MIN = 0.2;
 const DEFAULT_RADIAL_SCALE_MAX = 1.3;
@@ -94,6 +97,7 @@ export default function App() {
   const [nonSeedShowMode, setNonSeedShowMode] = useState<NonSeedShowMode>("all");
   const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [pathTreesOpen, setPathTreesOpen] = useState(false);
   const diskViewRef = useRef<DiskViewHandle>(null);
   const nodeInteractionRef = useRef<DiskViewNodeInteraction | null>(null);
   const appliedFocusRef = useRef(appliedFocus);
@@ -163,17 +167,42 @@ export default function App() {
     };
   }, []);
 
-  const scene: SceneBuffers | null = useMemo(() => {
+  const z0Current = useMemo(() => {
     if (!bundle || !appliedFocus.trim()) return null;
     try {
-      const z0 = z0FromProtein(bundle, appliedFocus);
-      const seeds = parseSeeds(appliedSeedsText);
-      if (seeds.size === 0) return null;
-      return computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode);
+      return z0FromProtein(bundle, appliedFocus);
     } catch {
       return null;
     }
-  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode]);
+  }, [bundle, appliedFocus]);
+
+  const graphCSR = useMemo(() => (bundle ? bundleToCSR(bundle) : null), [bundle]);
+
+  const graphInteractionKey = useMemo(
+    () =>
+      bundle
+        ? `${bundle.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}`
+        : "",
+    [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode],
+  );
+
+  const [pathOverlayPinned, setPathOverlayPinned] = useState<{
+    buf: PathOverlayBuffer;
+    key: string;
+  } | null>(null);
+  const pathOverlay =
+    pathOverlayPinned && pathOverlayPinned.key === graphInteractionKey ? pathOverlayPinned.buf : null;
+
+  const scene: SceneBuffers | null = useMemo(() => {
+    if (!bundle || !appliedFocus.trim() || !z0Current) return null;
+    try {
+      const seeds = parseSeeds(appliedSeedsText);
+      if (seeds.size === 0) return null;
+      return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode);
+    } catch {
+      return null;
+    }
+  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode, z0Current]);
 
   const pickerNames = useMemo(
     () => (bundle ? focusPickerNames(bundle, appliedSeedsText, appliedFocus) : []),
@@ -200,6 +229,9 @@ export default function App() {
       } else if (e.code === "KeyA") {
         e.preventDefault();
         setAnalysisOpen((o) => !o);
+      } else if (e.code === "KeyS") {
+        e.preventDefault();
+        setPathTreesOpen((o) => !o);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -328,11 +360,12 @@ export default function App() {
   return (
     <div
       className="shell"
-      title="Shortcuts: R reset view, F fit subgraph, A analysis."
+      title="Shortcuts: R reset view, F fit subgraph, A analysis, S path/trees."
     >
       <DiskView
         ref={diskViewRef}
         scene={scene}
+        pathOverlay={pathOverlay}
         webGpuError={webGpuError}
         showSeedLabels={showSeedLabels}
         showCrosshair={showCrosshair}
@@ -353,11 +386,27 @@ export default function App() {
         seedNamesOrdered={analysisSeedOrder}
       />
 
+      <PathTreesFloater
+        open={pathTreesOpen}
+        onClose={() => setPathTreesOpen(false)}
+        bundle={bundle}
+        scene={scene}
+        z0={z0Current}
+        csr={graphCSR}
+        pickerNames={pickerNames}
+        appliedFocus={appliedFocus}
+        appliedSeedsText={appliedSeedsText}
+        onPathOverlayChange={(b) =>
+          setPathOverlayPinned(b && graphInteractionKey ? { buf: b, key: graphInteractionKey } : null)
+        }
+      />
+
       <details className="advancedPanel">
         <summary>Advanced</summary>
         <div className="advancedInner">
           <p className="advancedShortcutsHint">
-            Shortcuts: <kbd>R</kbd> reset view, <kbd>F</kbd> fit subgraph, <kbd>A</kbd> analysis.
+            Shortcuts: <kbd>R</kbd> reset view, <kbd>F</kbd> fit subgraph, <kbd>A</kbd> analysis,{" "}
+            <kbd>S</kbd> path/trees.
           </p>
           <label
             className="seedLabelsCb"

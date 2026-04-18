@@ -216,6 +216,101 @@
   background: #121218;
 }
 
+.pathTreesFloater {
+  position: fixed;
+  z-index: 19;
+  display: flex;
+  flex-direction: column;
+  min-width: 300px;
+  max-width: min(48vw, 440px);
+  max-height: min(52vh, 480px);
+  resize: both;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 200, 120, 0.22);
+  background: rgba(22, 20, 18, 0.97);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.pathTreesFloaterBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 10px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #c8c8d0;
+}
+
+.pathTreesConcepts p {
+  margin: 0 0 8px;
+}
+
+.pathTreesControls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pathTreesLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  color: #a8a8b0;
+}
+
+.pathTreesSelect {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(30, 28, 26, 0.95);
+  color: #e8e8ea;
+  max-width: 100%;
+}
+
+.pathTreesBtnRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pathTreesBtn {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 180, 80, 0.35);
+  background: rgba(120, 80, 40, 0.35);
+  color: #f0e8e0;
+  cursor: pointer;
+}
+
+.pathTreesBtn:hover {
+  background: rgba(140, 100, 50, 0.45);
+}
+
+.pathTreesBtnGhost {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(40, 40, 44, 0.5);
+  color: #c4c4c8;
+}
+
+.pathTreesBtnGhost:hover {
+  background: rgba(55, 55, 60, 0.55);
+}
+
+.pathTreesHint {
+  margin: 0;
+  font-size: 10px;
+  color: #8e8e96;
+}
+
+.pathTreesMsg {
+  margin: 6px 0 0;
+  font-size: 10px;
+  color: #a8c8ff;
+}
+
 .resetViewBtn {
   align-self: flex-start;
   padding: 4px 10px;
