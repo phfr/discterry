@@ -1,0 +1,10 @@
+# Speed up `docker build` when context is repo root
+.git
+.github
+**/.DS_Store
+**/node_modules
+**/.venv
+**/__pycache__
+*.pyc
+notebooks/.ipynb_checkpoints
+dist
