@@ -16,6 +16,8 @@ Real networks often show **heterogeneous degrees**, **hierarchy**, and **metric 
 
 **How (at the level of artifacts):** the standalone D-Mercator program (not shipped in this repo) reads an **edgelist**, runs the optimization / sampling procedure described in the paper, and writes text/binary outputs. This repository **consumes** those outputs from a run folder such as `d-mercator-run/d2/`.
 
+For **native 3D** runs (`DIMENSION 3`, four `Inf.Pos.*` columns, e.g. `d-mercator-run/d3/`), use the standalone notebook suite [`notebooks/dmercator3d/README.md`](notebooks/dmercator3d/README.md), which does **not** import `notebooks/dmercator/dmercator_io.py`.
+
 ---
 
 ## 2. Files produced by a D-Mercator run (inputs to this repo)
