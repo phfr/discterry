@@ -35,6 +35,10 @@ import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js
 import type { NodeDiskHoverTooltip } from "../nodeListTooltip";
 import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
 import type { SceneBuffers3d } from "../model/computeScene3d";
+import {
+  buildHoverNeighborLinePositions3d,
+  type HoverNeighborGraph3d,
+} from "../model/hoverNeighborEdgePositions";
 import { VIEWER_RIM_GAMMA_MAX, VIEWER_RIM_GAMMA_MIN, VIEWER_RIM_WHEEL_SENS } from "../math/constants";
 
 /**
@@ -51,9 +55,9 @@ const CAM_REF_DIST = 2.85;
 const ZOOM_NODE_COMP_STRENGTH = 0.5;
 const PATH_OVERLAY_OPACITY_BASE = 0.55;
 /** Prim MST / path overlay stroke width in 3D (DiskView uses 4; this is 3×). */
-const PATH_OVERLAY_LINEWIDTH_3D = 12;
-/** Seed–seed (“red”) edges in 3D: 3× DiskView `lineBoth` linewidth (4). */
-const BOTH_SEED_LINEWIDTH_3D = 12;
+const PATH_OVERLAY_LINEWIDTH_3D = 8;
+/** Seed–seed (“red”) edges in 3D: 1.5× DiskView `lineBoth` linewidth (4). */
+const BOTH_SEED_LINEWIDTH_3D = 6;
 /** Shift+drag: rotate graph content (trackball-style, camera-relative axes). */
 const SHIFT_BALL_DRAG_ROT = 0.0055;
 
@@ -107,6 +111,8 @@ type BallCtx = {
   meshOther: InstanceType<typeof InstancedMesh> | null;
   meshSeeds: InstanceType<typeof InstancedMesh> | null;
   linePath: InstanceType<typeof Mesh> | null;
+  /** White incident edges for hovered vertex (LineSegments2, under spheres). */
+  lineHoverNbr: InstanceType<typeof Mesh> | null;
   ballWire: InstanceType<typeof LineSegments> | null;
   /** Graph + overlay (not the unit wire); Shift+drag rotates this group. */
   contentRoot: InstanceType<typeof Group>;
@@ -177,6 +183,12 @@ function setRimDisplayWorld(
   out.applyQuaternion(ctx.contentRoot.quaternion);
 }
 
+type BallHoverEdgeState = {
+  enabled: boolean;
+  graph: HoverNeighborGraph3d | null;
+  gid: number;
+};
+
 function fillRimGammaPositions(
   src: Float32Array,
   nFloats: number,
@@ -203,6 +215,47 @@ function fillRimGammaPositions(
       dst[i + 2] = z * s;
     }
   }
+}
+
+function refreshHoverNeighborEdges3d(
+  ctx: BallCtx,
+  buf: SceneBuffers3d | null,
+  st: BallHoverEdgeState,
+): void {
+  const parent = ctx.contentRoot;
+  disposeWideLineSegments2(ctx.lineHoverNbr, parent);
+  ctx.lineHoverNbr = null;
+  if (!buf || !st.enabled || !st.graph || st.gid < 0 || st.gid >= st.graph.csr.n) return;
+  const g = st.graph;
+  const raw = buildHoverNeighborLinePositions3d(
+    g.csr,
+    g.px,
+    g.py,
+    g.pz,
+    g.p0x,
+    g.p0y,
+    g.p0z,
+    st.gid,
+  );
+  if (raw.length < 6) return;
+  const gamma = ctx.rimGammaRef.current ?? 1;
+  const dst = new Float32Array(raw.length);
+  fillRimGammaPositions(raw, raw.length, gamma, dst);
+  const geom = new LineSegmentsGeometry();
+  geom.setPositions(dst);
+  const mat = new Line2NodeMaterial({
+    color: 0xffffff,
+    linewidth: 2,
+    transparent: true,
+    opacity: 0.9,
+    depthTest: true,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const ln = new LineSegments2(geom, mat);
+  ln.renderOrder = 18;
+  parent.add(ln);
+  ctx.lineHoverNbr = ln;
 }
 
 function radialScaleFromR(r: number, sMin: number, sMax: number): number {
@@ -283,9 +336,12 @@ function applySceneToBall(
   pathOverlay: PathOverlayBuffer | null,
   pathOverlayOpacityMult: number,
   showSeedLabels: boolean,
+  hoverEdgeRef: RefObject<BallHoverEdgeState>,
 ) {
   const parent = ctx.contentRoot;
   const gamma = ctx.rimGammaRef.current ?? 1;
+  disposeWideLineSegments2(ctx.lineHoverNbr, parent);
+  ctx.lineHoverNbr = null;
   disposeLine(ctx.lineBg, parent);
   disposeWideLineSegments2(ctx.lineBoth, parent);
   disposeLine(ctx.lineOne, parent);
@@ -295,6 +351,7 @@ function applySceneToBall(
   ctx.lineBg = ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
   if (!buf) {
     syncBallSeedLabels(ctx, null, showSeedLabels);
+    refreshHoverNeighborEdges3d(ctx, null, hoverEdgeRef.current);
     return;
   }
 
@@ -443,6 +500,7 @@ function applySceneToBall(
 
   orbitToPosition(orbitRef.current, camera.position);
   camera.lookAt(0, 0, 0);
+  refreshHoverNeighborEdges3d(ctx, buf, hoverEdgeRef.current);
 }
 
 /** Recompute instance scales only (orbit distance / sizing); keeps line meshes. */
@@ -560,6 +618,9 @@ export type BallView3dProps = {
   compensateZoomNodes: boolean;
   nodeMinMul: number;
   edgeOpacity: number;
+  /** Hover: draw incident graph edges in white for the node under the cursor. */
+  showHoverNeighborEdges?: boolean;
+  hoverNeighborGraph?: HoverNeighborGraph3d | null;
 };
 
 export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function BallView3d(
@@ -576,6 +637,8 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     compensateZoomNodes,
     nodeMinMul,
     edgeOpacity,
+    showHoverNeighborEdges = true,
+    hoverNeighborGraph = null,
   }: BallView3dProps,
   ref,
 ) {
@@ -598,6 +661,11 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
   });
   /** Rim power map γ for ball (same role as disk `rimPreservingGamma`). */
   const ballRimGammaRef = useRef(1);
+  const ballHoverEdgeRef = useRef<BallHoverEdgeState>({
+    enabled: showHoverNeighborEdges,
+    graph: hoverNeighborGraph,
+    gid: -1,
+  });
 
   useLayoutEffect(() => {
     sceneRef.current = scene;
@@ -610,6 +678,11 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
   useLayoutEffect(() => {
     showLabelsRef.current = showSeedLabels;
   }, [showSeedLabels]);
+
+  useLayoutEffect(() => {
+    ballHoverEdgeRef.current.enabled = showHoverNeighborEdges;
+    ballHoverEdgeRef.current.graph = hoverNeighborGraph;
+  }, [showHoverNeighborEdges, hoverNeighborGraph]);
 
   useLayoutEffect(() => {
     ballSizingRef.current = {
@@ -651,6 +724,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
             pathOverlayRef.current,
             pathOverlayOpacityMultRef.current,
             showLabelsRef.current,
+            ballHoverEdgeRef,
           );
         }
       }
@@ -668,6 +742,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         pathOverlayRef.current,
         pathOverlayOpacityMultRef.current,
         showLabelsRef.current,
+        ballHoverEdgeRef,
       );
     },
     setPathOverlayOpacityMultiplier(mult: number) {
@@ -684,6 +759,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         pathOverlayRef.current,
         pathOverlayOpacityMultRef.current,
         showLabelsRef.current,
+        ballHoverEdgeRef,
       );
     },
     fitSubgraphToView() {
@@ -757,6 +833,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       meshOther: null,
       meshSeeds: null,
       linePath: null,
+      lineHoverNbr: null,
       ballWire,
       contentRoot,
       rimGammaRef: ballRimGammaRef,
@@ -854,6 +931,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
             pathOverlayRef.current,
             pathOverlayOpacityMultRef.current,
             showLabelsRef.current,
+            ballHoverEdgeRef,
           );
         }
         return;
@@ -878,6 +956,8 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         lastY: e.clientY,
       };
       hideNodeTip();
+      ballHoverEdgeRef.current.gid = -1;
+      refreshHoverNeighborEdges3d(ctx, sceneRef.current, ballHoverEdgeRef.current);
       (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
     };
 
@@ -910,8 +990,10 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         }
       } else if (nip && buf) {
         const gid = pickGraphIndexAtEvent(e, renderer.domElement, camera, buf, ctx);
+        ballHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
+        refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
       }
     };
 
@@ -940,13 +1022,17 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       }
       if (nip && buf) {
         const gid = pickGraphIndexAtEvent(e, renderer.domElement, camera, buf, ctx);
+        ballHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
+        refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
       } else hideNodeTip();
     };
 
     const onPointerLeave = () => {
       hideNodeTip();
+      ballHoverEdgeRef.current.gid = -1;
+      refreshHoverNeighborEdges3d(ctx, sceneRef.current, ballHoverEdgeRef.current);
     };
 
     const loop = () => {
@@ -984,6 +1070,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
           pathOverlayRef.current,
           pathOverlayOpacityMultRef.current,
           showLabelsRef.current,
+          ballHoverEdgeRef,
         );
         loop();
       } catch (err) {
@@ -1012,6 +1099,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       disposeWideLineSegments2(ctx.lineBoth, cr);
       disposeLine(ctx.lineOne, cr);
       disposeWideLineSegments2(ctx.linePath, cr);
+      disposeWideLineSegments2(ctx.lineHoverNbr, cr);
       disposeInst(ctx.meshOther, cr);
       disposeInst(ctx.meshSeeds, cr);
       scene3.remove(cr);
@@ -1040,12 +1128,15 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       pathOverlayRef.current,
       pathOverlayOpacityMultRef.current,
       showSeedLabels,
+      ballHoverEdgeRef,
     );
   }, [
     scene,
     pathOverlay,
     webGpuError,
     showSeedLabels,
+    showHoverNeighborEdges,
+    hoverNeighborGraph,
     centerWeightedSizes,
     radialScaleMin,
     radialScaleMax,

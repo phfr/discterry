@@ -29,6 +29,7 @@ import {
 } from "./model/computeScene";
 import { computeScene3d, type SceneBuffers3d } from "./model/computeScene3d";
 import { bundleToCSR } from "./model/graphSearch";
+import type { HoverNeighborGraph2d, HoverNeighborGraph3d } from "./model/hoverNeighborEdgePositions";
 import { tryBuildPrimMstOverlay, tryBuildPrimMstOverlay3d } from "./model/primMstOverlay";
 import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
@@ -154,6 +155,8 @@ export default function App() {
   const [pathTreesOpen, setPathTreesOpen] = useState(false);
   /** Shift+U: draw all graph edges; non-seed–non-seed segments are faint light orange (see DiskView). */
   const [showAllGraphEdges, setShowAllGraphEdges] = useState(false);
+  /** Advanced: white incident edges on node hover (2D disk + 3D ball). */
+  const [showHoverNeighborEdges, setShowHoverNeighborEdges] = useState(true);
   const [focusSearch, setFocusSearch] = useState("");
   const [focusSearchHl, setFocusSearchHl] = useState(0);
   const diskViewRef = useRef<DiskViewHandle>(null);
@@ -285,6 +288,24 @@ export default function App() {
     if (bundle3d) return bundleToCSR(bundle3d);
     return null;
   }, [bundle, bundle3d]);
+
+  const hoverNeighborGraph2d = useMemo((): HoverNeighborGraph2d | null => {
+    if (!bundle || !graphCSR || !z0Current) return null;
+    return { csr: graphCSR, zx: bundle.x, zy: bundle.y, z0: z0Current };
+  }, [bundle, graphCSR, z0Current]);
+
+  const hoverNeighborGraph3d = useMemo((): HoverNeighborGraph3d | null => {
+    if (!bundle3d || !graphCSR || !p0Ball) return null;
+    return {
+      csr: graphCSR,
+      px: bundle3d.x,
+      py: bundle3d.y,
+      pz: bundle3d.z,
+      p0x: p0Ball.x,
+      p0y: p0Ball.y,
+      p0z: p0Ball.z,
+    };
+  }, [bundle3d, graphCSR, p0Ball]);
 
   const graphInteractionKey = useMemo(() => {
     if (dataMode === "3d" && bundle3d) {
@@ -817,6 +838,8 @@ export default function App() {
           compensateZoomNodes={compensateZoomNodes}
           nodeMinMul={nodeMinMul}
           edgeOpacity={edgeOpacity}
+          showHoverNeighborEdges={showHoverNeighborEdges}
+          hoverNeighborGraph={hoverNeighborGraph3d}
         />
       ) : (
         <DiskView
@@ -833,6 +856,8 @@ export default function App() {
           compensateZoomNodes={compensateZoomNodes}
           nodeMinMul={nodeMinMul}
           edgeOpacity={edgeOpacity}
+          showHoverNeighborEdges={showHoverNeighborEdges}
+          hoverNeighborGraph={hoverNeighborGraph2d}
           nodeInteractionRef={nodeInteractionRef as RefObject<DiskViewNodeInteraction | null>}
         />
       )}
@@ -923,6 +948,17 @@ export default function App() {
               onChange={(e) => setShowCrosshair(e.target.checked)}
             />
             <span>Show crosshair</span>
+          </label>
+          <label
+            className="seedLabelsCb"
+            title="While the node tooltip is active, draw all graph edges incident on that vertex in white (Poincaré geodesics)."
+          >
+            <input
+              type="checkbox"
+              checked={showHoverNeighborEdges}
+              onChange={(e) => setShowHoverNeighborEdges(e.target.checked)}
+            />
+            <span>Hover: highlight neighbor edges</span>
           </label>
           <label
             className="advancedSlider"
