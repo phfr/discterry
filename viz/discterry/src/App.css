@@ -67,7 +67,8 @@
   color: #b4b4bc;
 }
 
-.advancedPanel > summary {
+.advancedPanel > summary,
+.floatPanel > summary {
   cursor: pointer;
   font-weight: 600;
   color: #d0d0d8;
@@ -75,21 +76,25 @@
   user-select: none;
 }
 
-.advancedPanel > summary::-webkit-details-marker {
+.advancedPanel > summary::-webkit-details-marker,
+.floatPanel > summary::-webkit-details-marker {
   display: none;
 }
 
-.advancedPanel > summary::before {
+.advancedPanel > summary::before,
+.floatPanel > summary::before {
   content: "▸ ";
   display: inline-block;
   transition: transform 0.12s ease;
 }
 
-.advancedPanel[open] > summary::before {
+.advancedPanel[open] > summary::before,
+.floatPanel[open] > summary::before {
   transform: rotate(90deg);
 }
 
-.advancedPanel .advancedInner {
+.advancedPanel .advancedInner,
+.floatPanel .floatPanelBody {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -380,19 +385,32 @@
 
 .floatPanel {
   position: fixed;
-  top: 10px;
-  left: 10px;
+  top: 4px;
+  left: 4px;
   z-index: 20;
   max-width: min(440px, 84vw);
-  max-height: calc(100vh - 20px);
+  max-height: calc(100vh - 8px);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px;
+  padding: 6px 10px 8px;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(6px);
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  color: #b4b4bc;
+}
+
+.floatPanel:not([open]) {
+  max-height: none;
+  gap: 0;
+}
+
+.floatPanel .floatPanelBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .advancedSelect {
@@ -651,6 +669,40 @@
 
 .nameBtnOn:hover {
   background: rgba(120, 160, 255, 0.35);
+}
+
+/* Native Z (2D) / stereographic raw ball (3D); visibility from Advanced → “Show overview minimap”. */
+.graphMinimap {
+  position: fixed;
+  left: 4px;
+  bottom: 4px;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  /* was 240px; +40% ≈ 336px */
+  width: 336px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.graphMinimapCanvasWrap {
+  position: relative;
+  width: 100%;
+  min-height: 308px;
+  height: 319px;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
+}
+
+.graphMinimapCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
 }
 
 .statusBox {

@@ -977,24 +977,31 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const shiftPick =
         !wasDrag &&
         (e.shiftKey || (typeof e.getModifierState === "function" && e.getModifierState("Shift")));
+      let skipHoverRefresh = false;
       if (!wasDrag) {
         const nip = nodeInteractionRef?.current;
         if (nip && buf) {
           const gid = pickGraphIndexAtPointerEvent(e, canvas, camera, buf, ctx, ndcPointer, raycaster);
           if (gid !== null) {
             if (shiftPick && nip.shiftPickGraphIndex) nip.shiftPickGraphIndex(gid);
-            else if (!shiftPick) nip.pickGraphIndex(gid);
+            else if (!shiftPick) {
+              nip.pickGraphIndex(gid);
+              diskHoverEdgeRef.current.gid = -1;
+              refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+              hideNodeTip();
+              skipHoverRefresh = true;
+            }
           }
         }
       }
       const nip = nodeInteractionRef?.current;
-      if (nip && buf) {
+      if (!skipHoverRefresh && nip && buf) {
         const gid = pickGraphIndexAtPointerEvent(e, canvas, camera, buf, ctx, ndcPointer, raycaster);
         diskHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
         refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
-      } else hideNodeTip();
+      } else if (!skipHoverRefresh) hideNodeTip();
     };
 
     const onPointerLeave = () => {

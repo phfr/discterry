@@ -245,7 +245,7 @@ function refreshHoverNeighborEdges3d(
   geom.setPositions(dst);
   const mat = new Line2NodeMaterial({
     color: 0xffffff,
-    linewidth: 2,
+    linewidth: 1,
     transparent: true,
     opacity: 0.9,
     depthTest: true,
@@ -1009,6 +1009,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       }
       const buf = sceneRef.current;
       const nip = nodeInteractionRef?.current;
+      let skipHoverRefresh = false;
       if (!wasDrag && nip && buf) {
         const shiftPick =
           shiftHeld ||
@@ -1017,16 +1018,23 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         const gid = pickGraphIndexAtEvent(e, renderer.domElement, camera, buf, ctx);
         if (gid !== null) {
           if (shiftPick && nip.shiftPickGraphIndex) nip.shiftPickGraphIndex(gid);
-          else if (!shiftPick) nip.pickGraphIndex(gid);
+          else if (!shiftPick) {
+            nip.pickGraphIndex(gid);
+            /* Focus pick: do not leave white hover-neighbor preview until next move. */
+            ballHoverEdgeRef.current.gid = -1;
+            refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
+            hideNodeTip();
+            skipHoverRefresh = true;
+          }
         }
       }
-      if (nip && buf) {
+      if (!skipHoverRefresh && nip && buf) {
         const gid = pickGraphIndexAtEvent(e, renderer.domElement, camera, buf, ctx);
         ballHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
         refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
-      } else hideNodeTip();
+      } else if (!skipHoverRefresh) hideNodeTip();
     };
 
     const onPointerLeave = () => {
