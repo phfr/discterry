@@ -687,13 +687,14 @@
   overflow: visible;
 }
 
+/* Right-click toggle: 40% larger than base (336×319). */
 .graphMinimap--expanded {
-  width: 672px;
+  width: calc(336px * 1.4);
 }
 
 .graphMinimap--expanded .graphMinimapCanvasWrap {
-  min-height: 616px;
-  height: 638px;
+  min-height: calc(308px * 1.4);
+  height: calc(319px * 1.4);
 }
 
 .graphMinimapCanvasWrap {

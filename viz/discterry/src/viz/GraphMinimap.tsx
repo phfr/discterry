@@ -527,7 +527,6 @@ export function GraphMinimap({
     <div
       className={`graphMinimap${minimapExpanded ? " graphMinimap--expanded" : ""}`}
       onContextMenu={onMinimapContextMenu}
-      title="Right-click: toggle 2× minimap size"
     >
       <div ref={wrapRef} className="graphMinimapCanvasWrap">
         {isGlobe && graph3d ? (
