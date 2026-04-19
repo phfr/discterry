@@ -1,18 +1,20 @@
-import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { GraphBundle } from "../data/loadBundle";
 import type { GraphBundle3d } from "../data/loadBundle3d";
 import type { Complex } from "../math/mobius";
 import { clampP0 } from "../math/poincareBall";
 import type { Vec3 } from "../p0FromProtein";
+import type { Minimap2dMode, Minimap3dMode } from "./minimapChart";
 import {
-  boundsNativeZDisk,
-  boundsStereoRaw,
-  stereoNorthFromBallChart,
-  stereoNorthToUnitSphere,
-  nativeZClickToComplex,
-  stereoMinimapClickToUV,
+  ballDirToChart,
+  boundsMinimap2dChart,
+  boundsMinimap3dChart,
+  diskPointToChart,
+  minimap2dChartClickToComplex,
+  minimapChartClickToUnitSphere,
   worldToMinimapPixel,
 } from "./minimapChart";
+import { MinimapGlobe3d } from "./MinimapGlobe3d";
 
 /** Place Mobius center well inside the ball so the main view responds clearly to minimap picks. */
 const P0_FROM_MINIMAP_INTERIOR = 0.52;
@@ -26,6 +28,8 @@ export type GraphMinimapProps = {
   mode: "2d" | "3d";
   graph2d: GraphBundle | null;
   graph3d: GraphBundle3d | null;
+  minimap2dMode: Minimap2dMode;
+  minimap3dMode: Minimap3dMode;
   /** Shown immediately when starting a focus animation (same as main UI key), not only after `appliedFocus` commits. */
   focusIndicatorName: string;
   seeds: Set<string>;
@@ -36,6 +40,7 @@ export type GraphMinimapProps = {
 
 type Layout2d = {
   kind: "2d";
+  projection: Minimap2dMode;
   n: number;
   stride: number;
   cx: number;
@@ -49,6 +54,7 @@ type Layout2d = {
 
 type Layout3d = {
   kind: "3d";
+  projection: Minimap3dMode;
   n: number;
   stride: number;
   cx: number;
@@ -64,13 +70,21 @@ type Layout3d = {
 type Layout = Layout2d | Layout3d | null;
 type LayoutNonNull = Layout2d | Layout3d;
 
-function buildLayout(mode: "2d" | "3d", graph2d: GraphBundle | null, graph3d: GraphBundle3d | null): Layout {
+function buildLayout(
+  mode: "2d" | "3d",
+  graph2d: GraphBundle | null,
+  graph3d: GraphBundle3d | null,
+  minimap2dMode: Minimap2dMode,
+  minimap3dMode: Minimap3dMode,
+): Layout {
   if (mode === "2d" && graph2d) {
     const n = graph2d.vertex.length;
-    const b = boundsNativeZDisk(graph2d.x, graph2d.y, n);
+    const projection = minimap2dMode;
+    const b = boundsMinimap2dChart(graph2d.x, graph2d.y, n, projection);
     const stride = n > MINIMAP_DRAW_STRIDE_THRESHOLD ? Math.ceil(n / MINIMAP_DRAW_STRIDE_THRESHOLD) : 1;
     return {
       kind: "2d",
+      projection,
       n,
       stride,
       cx: b.cx,
@@ -84,10 +98,15 @@ function buildLayout(mode: "2d" | "3d", graph2d: GraphBundle | null, graph3d: Gr
   }
   if (mode === "3d" && graph3d) {
     const n = graph3d.vertex.length;
-    const b = boundsStereoRaw(graph3d.x, graph3d.y, graph3d.z, n);
+    const projection = minimap3dMode;
+    const b =
+      projection === "globe_webgl"
+        ? { cx: 0, cy: 0, half: 1 }
+        : boundsMinimap3dChart(graph3d.x, graph3d.y, graph3d.z, n, projection);
     const stride = n > MINIMAP_DRAW_STRIDE_THRESHOLD ? Math.ceil(n / MINIMAP_DRAW_STRIDE_THRESHOLD) : 1;
     return {
       kind: "3d",
+      projection,
       n,
       stride,
       cx: b.cx,
@@ -142,9 +161,10 @@ const R_FOCUS = 2.25;
 const R_FOCUS_RING = 4.25;
 
 function layoutBaseCacheSig(layout: LayoutNonNull, cssW: number, cssH: number): string {
+  const proj = layout.kind === "3d" ? layout.projection : layout.projection;
   const a = layout.vertex[0] ?? "";
   const b = layout.vertex[layout.n - 1] ?? "";
-  return `${layout.kind}|${layout.n}|${layout.stride}|${layout.cx}|${layout.cy}|${layout.half}|${cssW}|${cssH}|${a}|${b}`;
+  return `${layout.kind}|${proj}|${layout.n}|${layout.stride}|${layout.cx}|${layout.cy}|${layout.half}|${cssW}|${cssH}|${a}|${b}`;
 }
 
 /** Draw static background + rim (2d) + all vertices as small green dots (CSS pixel space). */
@@ -160,14 +180,22 @@ function drawMinimapBaseLayer(
   if (layout.kind === "2d") {
     const L = layout;
     ctx.save();
-    pathUnitDisk2d(ctx, L, inner, pad);
-    ctx.clip();
-    ctx.fillStyle = "rgba(14,14,16,0.92)";
-    ctx.fill();
-    drawRimUnitCircle2d(ctx, L, inner, pad, 0.35);
+    if (L.projection === "native_disk") {
+      pathUnitDisk2d(ctx, L, inner, pad);
+      ctx.clip();
+      ctx.fillStyle = "rgba(14,14,16,0.92)";
+      ctx.fill();
+      drawRimUnitCircle2d(ctx, L, inner, pad, 0.35);
+    } else {
+      ctx.beginPath();
+      ctx.rect(pad, pad, inner, inner);
+      ctx.clip();
+      ctx.fillStyle = "rgba(14,14,16,0.92)";
+      ctx.fill();
+    }
+    const proj = L.projection;
     for (let i = 0; i < L.n; i += L.stride) {
-      const wx = L.zx[i]!;
-      const wy = L.zy[i]!;
+      const [wx, wy] = diskPointToChart(proj, L.zx[i]!, L.zy[i]!);
       const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       ctx.fillStyle = "rgba(70, 200, 120, 0.28)";
       ctx.beginPath();
@@ -176,10 +204,13 @@ function drawMinimapBaseLayer(
     }
     ctx.restore();
   } else {
-    /* 3D stereo: transparent background (no full-rect fill); dots only. */
-    for (let i = 0; i < layout.n; i += layout.stride) {
-      const [wx, wy] = stereoNorthFromBallChart(layout.px[i]!, layout.py[i]!, layout.pz[i]!);
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+    const L = layout;
+    if (L.projection === "globe_webgl") return;
+    const proj = L.projection;
+    /* 3D chart: transparent background (no full-rect fill); dots only. */
+    for (let i = 0; i < L.n; i += L.stride) {
+      const [wx, wy] = ballDirToChart(proj, L.px[i]!, L.py[i]!, L.pz[i]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       ctx.fillStyle = "rgba(70, 200, 120, 0.28)";
       ctx.beginPath();
       ctx.arc(px, py, R_GREEN, 0, Math.PI * 2);
@@ -200,10 +231,11 @@ function nearestVertexAtMinimapPixel(
   let bestI = -1;
   let bestD = maxSq;
   if (layout.kind === "2d") {
-    for (let i = 0; i < layout.n; i += layout.stride) {
-      const wx = layout.zx[i]!;
-      const wy = layout.zy[i]!;
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+    const L = layout;
+    const proj = L.projection;
+    for (let i = 0; i < L.n; i += L.stride) {
+      const [wx, wy] = diskPointToChart(proj, L.zx[i]!, L.zy[i]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       const dx = clickPx - px;
       const dy = clickPy - py;
       const d = dx * dx + dy * dy;
@@ -213,9 +245,12 @@ function nearestVertexAtMinimapPixel(
       }
     }
   } else {
-    for (let i = 0; i < layout.n; i += layout.stride) {
-      const [wx, wy] = stereoNorthFromBallChart(layout.px[i]!, layout.py[i]!, layout.pz[i]!);
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+    const L = layout;
+    if (L.projection === "globe_webgl") return -1;
+    const proj = L.projection;
+    for (let i = 0; i < L.n; i += L.stride) {
+      const [wx, wy] = ballDirToChart(proj, L.px[i]!, L.py[i]!, L.pz[i]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       const dx = clickPx - px;
       const dy = clickPy - py;
       const d = dx * dx + dy * dy;
@@ -268,25 +303,31 @@ function drawCanvas(
     focusName.trim().length > 0 ? layout.nameToIndex.get(focusName.trim()) ?? -1 : -1;
 
   if (layout.kind === "2d") {
+    const L = layout;
     ctx.save();
-    pathUnitDisk2d(ctx, layout, inner, pad);
-    ctx.clip();
-    for (let i = 0; i < layout.n; i += layout.stride) {
+    if (L.projection === "native_disk") {
+      pathUnitDisk2d(ctx, L, inner, pad);
+      ctx.clip();
+    } else {
+      ctx.beginPath();
+      ctx.rect(pad, pad, inner, inner);
+      ctx.clip();
+    }
+    const proj = L.projection;
+    for (let i = 0; i < L.n; i += L.stride) {
       if (i === focusIdx) continue;
-      const name = layout.vertex[i]!;
+      const name = L.vertex[i]!;
       if (!seeds.has(name)) continue;
-      const wx = layout.zx[i]!;
-      const wy = layout.zy[i]!;
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+      const [wx, wy] = diskPointToChart(proj, L.zx[i]!, L.zy[i]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       ctx.fillStyle = "rgba(255,55,55,1)";
       ctx.beginPath();
       ctx.arc(px, py, R_SEED, 0, Math.PI * 2);
       ctx.fill();
     }
     if (focusIdx >= 0) {
-      const wx = layout.zx[focusIdx]!;
-      const wy = layout.zy[focusIdx]!;
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+      const [wx, wy] = diskPointToChart(proj, L.zx[focusIdx]!, L.zy[focusIdx]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       ctx.fillStyle = "rgba(255,255,255,0.95)";
       ctx.beginPath();
       ctx.arc(px, py, R_FOCUS, 0, Math.PI * 2);
@@ -299,20 +340,23 @@ function drawCanvas(
     }
     ctx.restore();
   } else {
-    for (let i = 0; i < layout.n; i += layout.stride) {
+    const L = layout;
+    if (L.projection === "globe_webgl") return;
+    const proj = L.projection;
+    for (let i = 0; i < L.n; i += L.stride) {
       if (i === focusIdx) continue;
-      const name = layout.vertex[i]!;
+      const name = L.vertex[i]!;
       if (!seeds.has(name)) continue;
-      const [wx, wy] = stereoNorthFromBallChart(layout.px[i]!, layout.py[i]!, layout.pz[i]!);
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+      const [wx, wy] = ballDirToChart(proj, L.px[i]!, L.py[i]!, L.pz[i]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       ctx.fillStyle = "rgba(255,55,55,1)";
       ctx.beginPath();
       ctx.arc(px, py, R_SEED, 0, Math.PI * 2);
       ctx.fill();
     }
     if (focusIdx >= 0) {
-      const [wx, wy] = stereoNorthFromBallChart(layout.px[focusIdx]!, layout.py[focusIdx]!, layout.pz[focusIdx]!);
-      const [px, py] = worldToMinimapPixel(wx, wy, layout.cx, layout.cy, layout.half, inner, pad);
+      const [wx, wy] = ballDirToChart(proj, L.px[focusIdx]!, L.py[focusIdx]!, L.pz[focusIdx]!);
+      const [px, py] = worldToMinimapPixel(wx, wy, L.cx, L.cy, L.half, inner, pad);
       ctx.fillStyle = "rgba(255,255,255,0.95)";
       ctx.beginPath();
       ctx.arc(px, py, R_FOCUS, 0, Math.PI * 2);
@@ -335,6 +379,8 @@ export function GraphMinimap({
   mode,
   graph2d,
   graph3d,
+  minimap2dMode,
+  minimap3dMode,
   focusIndicatorName,
   seeds,
   onChartPick2d,
@@ -347,12 +393,18 @@ export function GraphMinimap({
   const baseCacheSigRef = useRef("");
   /** `performance.now()` when primary pointer went down on canvas; 0 if not tracking. */
   const pointerDownAtRef = useRef(0);
-  const layout = useMemo(() => buildLayout(mode, graph2d, graph3d), [mode, graph2d, graph3d]);
+  const [minimapExpanded, setMinimapExpanded] = useState(false);
+  const layout = useMemo(
+    () => buildLayout(mode, graph2d, graph3d, minimap2dMode, minimap3dMode),
+    [mode, graph2d, graph3d, minimap2dMode, minimap3dMode],
+  );
 
   const redraw = useCallback(() => {
     const wrap = wrapRef.current;
     const canvas = canvasRef.current;
-    if (!wrap || !canvas || !layout) return;
+    if (!wrap || !layout) return;
+    if (layout.kind === "3d" && layout.projection === "globe_webgl") return;
+    if (!canvas) return;
     if (!baseCacheRef.current) baseCacheRef.current = document.createElement("canvas");
     const baseCache = baseCacheRef.current;
     const cssW = Math.max(1, wrap.clientWidth);
@@ -365,7 +417,7 @@ export function GraphMinimap({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     drawCanvas(ctx, cssW, cssH, layout, seeds, focusIndicatorName, baseCache, baseCacheSigRef);
-  }, [layout, seeds, focusIndicatorName]);
+  }, [layout, seeds, focusIndicatorName, minimapExpanded]);
 
   useLayoutEffect(() => {
     redraw();
@@ -392,11 +444,20 @@ export function GraphMinimap({
         return;
       }
       if (layout.kind === "2d") {
-        const z = nativeZClickToComplex(px, py, layout.cx, layout.cy, layout.half, inner, pad);
+        const z = minimap2dChartClickToComplex(layout.projection, px, py, layout.cx, layout.cy, layout.half, inner, pad);
         onChartPick2d(z);
       } else {
-        const [u, v] = stereoMinimapClickToUV(px, py, layout.cx, layout.cy, layout.half, inner, pad);
-        const [sx, sy, sz] = stereoNorthToUnitSphere(u, v);
+        if (layout.projection === "globe_webgl") return;
+        const [sx, sy, sz] = minimapChartClickToUnitSphere(
+          layout.projection,
+          px,
+          py,
+          layout.cx,
+          layout.cy,
+          layout.half,
+          inner,
+          pad,
+        );
         try {
           const s = P0_FROM_MINIMAP_INTERIOR;
           const [x, y, z] = clampP0(s * sx, s * sy, s * sz);
@@ -453,19 +514,39 @@ export function GraphMinimap({
     [endPointerTracking],
   );
 
+  const onMinimapContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setMinimapExpanded((v) => !v);
+  }, []);
+
   if (!layout) return null;
 
+  const isGlobe = layout.kind === "3d" && layout.projection === "globe_webgl";
+
   return (
-    <div className="graphMinimap">
+    <div
+      className={`graphMinimap${minimapExpanded ? " graphMinimap--expanded" : ""}`}
+      onContextMenu={onMinimapContextMenu}
+      title="Right-click: toggle 2× minimap size"
+    >
       <div ref={wrapRef} className="graphMinimapCanvasWrap">
-        <canvas
-          ref={canvasRef}
-          className="graphMinimapCanvas"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerCancel}
-        />
+        {isGlobe && graph3d ? (
+          <MinimapGlobe3d
+            graph3d={graph3d}
+            seeds={seeds}
+            focusIndicatorName={focusIndicatorName}
+            onPickFocus={onPickFocus}
+          />
+        ) : (
+          <canvas
+            ref={canvasRef}
+            className="graphMinimapCanvas"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerCancel}
+          />
+        )}
       </div>
     </div>
   );

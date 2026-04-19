@@ -45,6 +45,7 @@ import { AnalysisFloater } from "./viz/AnalysisFloater";
 import { BallView3d, type BallView3dHandle, type BallView3dNodeInteraction } from "./viz/BallView3d";
 import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
 import { PathTreesFloater } from "./viz/PathTreesFloater";
+import type { Minimap2dMode, Minimap3dMode } from "./viz/minimapChart";
 import { GraphMinimap } from "./viz/GraphMinimap";
 
 const DEFAULT_RADIAL_SCALE_MIN = 0.2;
@@ -155,6 +156,8 @@ export default function App() {
   /** Advanced: white incident edges on node hover (2D disk + 3D ball). */
   const [showHoverNeighborEdges, setShowHoverNeighborEdges] = useState(true);
   const [minimapVisible, setMinimapVisible] = useState(true);
+  const [minimap2dMode, setMinimap2dMode] = useState<Minimap2dMode>("native_disk");
+  const [minimap3dMode, setMinimap3dMode] = useState<Minimap3dMode>("stereo_north");
   const [seedPanelOpen, setSeedPanelOpen] = useState(true);
   /** Row highlight in seed list: list clicks, or main-viz pick only when that vertex is already a seed. */
   const [seedListHighlightName, setSeedListHighlightName] = useState("");
@@ -1057,6 +1060,8 @@ export default function App() {
           mode={bundle3d ? "3d" : "2d"}
           graph2d={bundle}
           graph3d={bundle3d}
+          minimap2dMode={minimap2dMode}
+          minimap3dMode={minimap3dMode}
           focusIndicatorName={focusUiKey}
           seeds={minimapSeeds}
           onChartPick2d={onMinimapChart2d}
@@ -1129,6 +1134,47 @@ export default function App() {
             />
             <span>Show overview minimap</span>
           </label>
+          {bundle ? (
+            <label
+              className="advancedSelect"
+              title="Chart for the bottom-left 2D overview (native disk vs polar / half-plane / sqrt views of the same data)."
+            >
+              <span className="advancedSelectLabel">2D overview</span>
+              <select
+                value={minimap2dMode}
+                onChange={(e) => setMinimap2dMode(e.target.value as Minimap2dMode)}
+                aria-label="2D overview chart"
+              >
+                <option value="native_disk">Native disk (re, im)</option>
+                <option value="polar_euclidean">Polar (|z|, arg z)</option>
+                <option value="hyperbolic_polar">Hyperbolic radius + angle</option>
+                <option value="upper_half_plane">Upper half-plane (Cayley)</option>
+                <option value="sqrt_branch">Principal √z</option>
+              </select>
+            </label>
+          ) : null}
+          {bundle3d ? (
+            <label
+              className="advancedSelect"
+              title="Projection for the bottom-left 3D overview: planar charts on canvas, or a small WebGL globe with orbit and pick."
+            >
+              <span className="advancedSelectLabel">3D overview</span>
+              <select
+                value={minimap3dMode}
+                onChange={(e) => setMinimap3dMode(e.target.value as Minimap3dMode)}
+                aria-label="3D overview projection"
+              >
+                <option value="stereo_north">North stereographic</option>
+                <option value="stereo_south">South stereographic</option>
+                <option value="ortho_xy">Orthographic (XY)</option>
+                <option value="ortho_xz">Orthographic (XZ)</option>
+                <option value="equirect">Equirectangular (lon/lat)</option>
+                <option value="lambert_north">Lambert azimuthal (north)</option>
+                <option value="gnomonic_north">Gnomonic (north, capped)</option>
+                <option value="globe_webgl">Globe (WebGL)</option>
+              </select>
+            </label>
+          ) : null}
           <label
             className="seedLabelsCb"
             title="While the node tooltip is active, draw all graph edges incident on that vertex in white (Poincaré geodesics)."
@@ -1262,8 +1308,8 @@ export default function App() {
         className="floatPanel"
         open={seedPanelOpen}
         onToggle={(e) => {
-          e.preventDefault();
-          setSeedPanelOpen((o) => !o);
+          /* Mirror native `open` — do not preventDefault or invert; that fights the DOM and can loop open/closed. */
+          setSeedPanelOpen(e.currentTarget.open);
         }}
       >
         <summary>Seeds &amp; focus</summary>
