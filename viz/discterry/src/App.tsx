@@ -153,8 +153,6 @@ export default function App() {
   const [pathTreesOpen, setPathTreesOpen] = useState(false);
   /** Shift+U: draw all graph edges; non-seed–non-seed segments are faint light orange (see DiskView). */
   const [showAllGraphEdges, setShowAllGraphEdges] = useState(false);
-  /** Advanced: white incident edges on node hover (2D disk + 3D ball). */
-  const [showHoverNeighborEdges, setShowHoverNeighborEdges] = useState(true);
   const [minimapVisible, setMinimapVisible] = useState(true);
   const [minimap2dMode, setMinimap2dMode] = useState<Minimap2dMode>("native_disk");
   const [minimap3dMode, setMinimap3dMode] = useState<Minimap3dMode>("stereo_north");
@@ -1000,7 +998,6 @@ export default function App() {
           compensateZoomNodes={compensateZoomNodes}
           nodeMinMul={nodeMinMul}
           edgeOpacity={edgeOpacity}
-          showHoverNeighborEdges={showHoverNeighborEdges}
           hoverNeighborGraph={hoverNeighborGraph3d}
         />
       ) : (
@@ -1018,7 +1015,6 @@ export default function App() {
           compensateZoomNodes={compensateZoomNodes}
           nodeMinMul={nodeMinMul}
           edgeOpacity={edgeOpacity}
-          showHoverNeighborEdges={showHoverNeighborEdges}
           hoverNeighborGraph={hoverNeighborGraph2d}
           nodeInteractionRef={nodeInteractionRef as RefObject<DiskViewNodeInteraction | null>}
         />
@@ -1175,17 +1171,6 @@ export default function App() {
               </select>
             </label>
           ) : null}
-          <label
-            className="seedLabelsCb"
-            title="While the node tooltip is active, draw all graph edges incident on that vertex in white (Poincaré geodesics)."
-          >
-            <input
-              type="checkbox"
-              checked={showHoverNeighborEdges}
-              onChange={(e) => setShowHoverNeighborEdges(e.target.checked)}
-            />
-            <span>Hover: highlight neighbor edges</span>
-          </label>
           <label
             className="advancedSlider"
             title="Opacity of additive blue one-seed edges on the disk and in the 3D ball."

@@ -337,6 +337,7 @@ function applySceneToBall(
   pathOverlayOpacityMult: number,
   showSeedLabels: boolean,
   hoverEdgeRef: RefObject<BallHoverEdgeState>,
+  altNeighborHoverRef: RefObject<boolean>,
 ) {
   const parent = ctx.contentRoot;
   const gamma = ctx.rimGammaRef.current ?? 1;
@@ -351,6 +352,7 @@ function applySceneToBall(
   ctx.lineBg = ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
   if (!buf) {
     syncBallSeedLabels(ctx, null, showSeedLabels);
+    hoverEdgeRef.current.enabled = altNeighborHoverRef.current;
     refreshHoverNeighborEdges3d(ctx, null, hoverEdgeRef.current);
     return;
   }
@@ -500,6 +502,7 @@ function applySceneToBall(
 
   orbitToPosition(orbitRef.current, camera.position);
   camera.lookAt(0, 0, 0);
+  hoverEdgeRef.current.enabled = altNeighborHoverRef.current;
   refreshHoverNeighborEdges3d(ctx, buf, hoverEdgeRef.current);
 }
 
@@ -618,8 +621,7 @@ export type BallView3dProps = {
   compensateZoomNodes: boolean;
   nodeMinMul: number;
   edgeOpacity: number;
-  /** Hover: draw incident graph edges in white for the node under the cursor. */
-  showHoverNeighborEdges?: boolean;
+  /** CSR + ball positions + focus; white neighbor edges when hovering + Alt. */
   hoverNeighborGraph?: HoverNeighborGraph3d | null;
 };
 
@@ -637,7 +639,6 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     compensateZoomNodes,
     nodeMinMul,
     edgeOpacity,
-    showHoverNeighborEdges = true,
     hoverNeighborGraph = null,
   }: BallView3dProps,
   ref,
@@ -661,8 +662,9 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
   });
   /** Rim power map γ for ball (same role as disk `rimPreservingGamma`). */
   const ballRimGammaRef = useRef(1);
+  const altNeighborHoverRef = useRef(false);
   const ballHoverEdgeRef = useRef<BallHoverEdgeState>({
-    enabled: showHoverNeighborEdges,
+    enabled: false,
     graph: hoverNeighborGraph,
     gid: -1,
   });
@@ -680,9 +682,8 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
   }, [showSeedLabels]);
 
   useLayoutEffect(() => {
-    ballHoverEdgeRef.current.enabled = showHoverNeighborEdges;
     ballHoverEdgeRef.current.graph = hoverNeighborGraph;
-  }, [showHoverNeighborEdges, hoverNeighborGraph]);
+  }, [hoverNeighborGraph]);
 
   useLayoutEffect(() => {
     ballSizingRef.current = {
@@ -725,6 +726,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
             pathOverlayOpacityMultRef.current,
             showLabelsRef.current,
             ballHoverEdgeRef,
+            altNeighborHoverRef,
           );
         }
       }
@@ -743,6 +745,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         pathOverlayOpacityMultRef.current,
         showLabelsRef.current,
         ballHoverEdgeRef,
+        altNeighborHoverRef,
       );
     },
     setPathOverlayOpacityMultiplier(mult: number) {
@@ -760,6 +763,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         pathOverlayOpacityMultRef.current,
         showLabelsRef.current,
         ballHoverEdgeRef,
+        altNeighborHoverRef,
       );
     },
     fitSubgraphToView() {
@@ -854,14 +858,37 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         shiftHeld = "shiftKey" in e && e.shiftKey === true;
       }
     };
+    const syncAltFromEvent = (e: PointerEvent | KeyboardEvent | WheelEvent) => {
+      if (typeof e.getModifierState === "function") {
+        /* Alt + AltGraph: left/right Alt, AltGr layouts, and macOS Option (maps to Alt in browsers). */
+        altNeighborHoverRef.current =
+          e.getModifierState("Alt") || e.getModifierState("AltGraph");
+      } else {
+        const alt = "altKey" in e && e.altKey === true;
+        const ag =
+          "altGraphKey" in e &&
+          (e as KeyboardEvent & { altGraphKey?: boolean }).altGraphKey === true;
+        altNeighborHoverRef.current = alt || ag;
+      }
+    };
+    const bumpBallHoverEdges = () => {
+      ballHoverEdgeRef.current.enabled = altNeighborHoverRef.current;
+      refreshHoverNeighborEdges3d(ctx, sceneRef.current, ballHoverEdgeRef.current);
+    };
     const onWindowKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Shift") shiftHeld = true;
+      syncAltFromEvent(e);
+      bumpBallHoverEdges();
     };
     const onWindowKeyUp = (e: KeyboardEvent) => {
       if (e.key === "Shift") shiftHeld = false;
+      syncAltFromEvent(e);
+      bumpBallHoverEdges();
     };
     const onWindowBlur = () => {
       shiftHeld = false;
+      altNeighborHoverRef.current = false;
+      bumpBallHoverEdges();
     };
     window.addEventListener("keydown", onWindowKeyDown);
     window.addEventListener("keyup", onWindowKeyUp);
@@ -910,6 +937,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       const shiftWheel =
         shiftHeld ||
         e.shiftKey ||
@@ -932,6 +960,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
             pathOverlayOpacityMultRef.current,
             showLabelsRef.current,
             ballHoverEdgeRef,
+            altNeighborHoverRef,
           );
         }
         return;
@@ -943,11 +972,13 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       if (buf && ballSizingRef.current.compensateZoomNodes) {
         refreshBallNodeScales(ctx, buf, orbitRef, ballSizingRef.current);
       }
+      bumpBallHoverEdges();
     };
 
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       dragRef.current = {
         active: true,
         downX: e.clientX,
@@ -957,12 +988,13 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       };
       hideNodeTip();
       ballHoverEdgeRef.current.gid = -1;
-      refreshHoverNeighborEdges3d(ctx, sceneRef.current, ballHoverEdgeRef.current);
+      bumpBallHoverEdges();
       (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
     };
 
     const onPointerMove = (e: PointerEvent) => {
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       const buf = sceneRef.current;
       const nip = nodeInteractionRef?.current;
       if (dragRef.current.active) {
@@ -993,12 +1025,13 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         ballHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
-        refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
+        bumpBallHoverEdges();
       }
     };
 
     const onPointerUp = (e: PointerEvent) => {
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       const wasDrag =
         Math.hypot(e.clientX - dragRef.current.downX, e.clientY - dragRef.current.downY) > 5;
       dragRef.current.active = false;
@@ -1022,7 +1055,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
             nip.pickGraphIndex(gid);
             /* Focus pick: do not leave white hover-neighbor preview until next move. */
             ballHoverEdgeRef.current.gid = -1;
-            refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
+            bumpBallHoverEdges();
             hideNodeTip();
             skipHoverRefresh = true;
           }
@@ -1033,14 +1066,14 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
         ballHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
-        refreshHoverNeighborEdges3d(ctx, buf, ballHoverEdgeRef.current);
+        bumpBallHoverEdges();
       } else if (!skipHoverRefresh) hideNodeTip();
     };
 
     const onPointerLeave = () => {
       hideNodeTip();
       ballHoverEdgeRef.current.gid = -1;
-      refreshHoverNeighborEdges3d(ctx, sceneRef.current, ballHoverEdgeRef.current);
+      bumpBallHoverEdges();
     };
 
     const loop = () => {
@@ -1079,6 +1112,7 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
           pathOverlayOpacityMultRef.current,
           showLabelsRef.current,
           ballHoverEdgeRef,
+          altNeighborHoverRef,
         );
         loop();
       } catch (err) {
@@ -1137,13 +1171,13 @@ export const BallView3d = forwardRef<BallView3dHandle, BallView3dProps>(function
       pathOverlayOpacityMultRef.current,
       showSeedLabels,
       ballHoverEdgeRef,
+      altNeighborHoverRef,
     );
   }, [
     scene,
     pathOverlay,
     webGpuError,
     showSeedLabels,
-    showHoverNeighborEdges,
     hoverNeighborGraph,
     centerWeightedSizes,
     radialScaleMin,

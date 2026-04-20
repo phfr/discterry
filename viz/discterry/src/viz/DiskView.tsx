@@ -168,9 +168,7 @@ type Props = {
   nodeMinMul: number;
   /** Additive blue geodesics (seed–nonseed); clamped in renderer. */
   edgeOpacity: number;
-  /** When true, hovering a node draws its incident edges in white (see `hoverNeighborGraph`). */
-  showHoverNeighborEdges?: boolean;
-  /** CSR + chart positions + focus; required for hover edges when enabled. */
+  /** CSR + chart positions + focus; white neighbor edges while hovering + Alt (see DiskView handlers). */
   hoverNeighborGraph?: HoverNeighborGraph2d | null;
   nodeInteractionRef?: RefObject<DiskViewNodeInteraction | null>;
 };
@@ -435,6 +433,7 @@ function applyBuffers(
   viewRef: RefObject<DiskViewTransform>,
   overlayRef: RefObject<PathOverlayBuffer | null>,
   hoverEdgeRef: RefObject<DiskHoverEdgeState>,
+  altNeighborHoverRef: RefObject<boolean>,
 ) {
   const { scene3 } = ctx;
   disposeLineBothWide(ctx.lineHoverNbr, scene3);
@@ -464,6 +463,7 @@ function applyBuffers(
   disposeInstancedMesh(ctx.meshSeeds, scene3);
   ctx.lineBg = ctx.lineBoth = ctx.lineOne = ctx.linePath = ctx.meshOther = ctx.meshSeeds = null;
   if (!buf) {
+    hoverEdgeRef.current.enabled = altNeighborHoverRef.current;
     refreshHoverNeighborEdges2d(ctx, viewRef, hoverEdgeRef.current);
     return;
   }
@@ -600,6 +600,7 @@ function applyBuffers(
     ctx.meshSeeds = mesh;
     scene3.add(mesh);
   }
+  hoverEdgeRef.current.enabled = altNeighborHoverRef.current;
   refreshHoverNeighborEdges2d(ctx, viewRef, hoverEdgeRef.current);
 }
 
@@ -617,7 +618,6 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     compensateZoomNodes,
     nodeMinMul,
     edgeOpacity,
-    showHoverNeighborEdges = true,
     hoverNeighborGraph = null,
     nodeInteractionRef,
   }: Props,
@@ -625,8 +625,10 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
   const ctxRef = useRef<ThreeCtx | null>(null);
+  /** When true, Alt is held: show white incident edges for hovered node (if `hoverNeighborGraph` is set). */
+  const altNeighborHoverRef = useRef(false);
   const diskHoverEdgeRef = useRef<DiskHoverEdgeState>({
-    enabled: showHoverNeighborEdges,
+    enabled: false,
     graph: hoverNeighborGraph,
     gid: -1,
   });
@@ -658,9 +660,8 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     showCrosshairRef.current = showCrosshair;
   }, [showCrosshair]);
   useLayoutEffect(() => {
-    diskHoverEdgeRef.current.enabled = showHoverNeighborEdges;
     diskHoverEdgeRef.current.graph = hoverNeighborGraph;
-  }, [showHoverNeighborEdges, hoverNeighborGraph]);
+  }, [hoverNeighborGraph]);
   useLayoutEffect(() => {
     diskDisplayRef.current = {
       centerWeighted: centerWeightedSizes,
@@ -687,7 +688,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const c = ctxRef.current;
       if (c) {
         updateOrthographicCamera(c.camera, diskViewTransformRef.current);
-        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       }
     },
     recenterPreservingZoom() {
@@ -698,7 +699,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       const c = ctxRef.current;
       if (c) {
         updateOrthographicCamera(c.camera, tr);
-        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+        applyBuffers(c, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       }
     },
     fitSubgraphToView() {
@@ -737,13 +738,13 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       tr.panX = cx;
       tr.panY = cy;
       updateOrthographicCamera(c.camera, tr);
-      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
     },
     applySceneBuffers(buf: SceneBuffers | null) {
       sceneRef.current = buf;
       const c = ctxRef.current;
       if (!c) return;
-      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+      applyBuffers(c, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       syncSeedLabelDom(c, buf, showLabelsRef.current);
     },
     setPathOverlayOpacityMultiplier(mult: number) {
@@ -882,18 +883,42 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         shiftHeld = "shiftKey" in e && e.shiftKey === true;
       }
     };
+    const syncAltFromEvent = (e: PointerEvent | KeyboardEvent | WheelEvent) => {
+      if (typeof e.getModifierState === "function") {
+        /* Alt + AltGraph: left/right Alt, AltGr layouts, and macOS Option (maps to Alt in browsers). */
+        altNeighborHoverRef.current =
+          e.getModifierState("Alt") || e.getModifierState("AltGraph");
+      } else {
+        const alt = "altKey" in e && e.altKey === true;
+        const ag =
+          "altGraphKey" in e &&
+          (e as KeyboardEvent & { altGraphKey?: boolean }).altGraphKey === true;
+        altNeighborHoverRef.current = alt || ag;
+      }
+    };
+    const bumpHoverNeighborEdges2d = () => {
+      diskHoverEdgeRef.current.enabled = altNeighborHoverRef.current;
+      refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+    };
     const onWindowKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Shift") shiftHeld = true;
+      syncAltFromEvent(e);
+      bumpHoverNeighborEdges2d();
     };
     const onWindowKeyUp = (e: KeyboardEvent) => {
       if (e.key === "Shift") shiftHeld = false;
+      syncAltFromEvent(e);
+      bumpHoverNeighborEdges2d();
     };
     const onWindowBlur = () => {
       shiftHeld = false;
+      altNeighborHoverRef.current = false;
+      bumpHoverNeighborEdges2d();
     };
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      syncAltFromEvent(e);
       const tr = diskViewTransformRef.current;
       const shiftWheel =
         shiftHeld ||
@@ -904,11 +929,11 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
           RIM_GAMMA_MAX,
           Math.max(RIM_GAMMA_MIN, tr.rimPreservingGamma * Math.exp(-e.deltaY * RIM_WHEEL_SENS)),
         );
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       } else {
         tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
         updateOrthographicCamera(camera, tr);
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       }
     };
 
@@ -919,16 +944,18 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       downPx = e.clientX;
       downPy = e.clientY;
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       lastPx = e.clientX;
       lastPy = e.clientY;
       hideNodeTip();
       diskHoverEdgeRef.current.gid = -1;
-      refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+      bumpHoverNeighborEdges2d();
       (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
     };
 
     const onPointerMove = (e: PointerEvent) => {
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       const canvas = renderer.domElement;
       const tr = diskViewTransformRef.current;
       const buf = sceneRef.current;
@@ -943,7 +970,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         const worldSpan = (2 * BASE_HALF_EXTENT) / tr.zoom;
         if (shiftHeld) {
           tr.mobius = incrementMobiusFromDrag(tr.mobius, dx, dy, cw, ch);
-          applyBuffers(ctx, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+          applyBuffers(ctx, buf, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
         } else {
           tr.panX -= (dx / cw) * worldSpan;
           tr.panY += (dy / ch) * worldSpan;
@@ -959,7 +986,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         diskHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
-        refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+        bumpHoverNeighborEdges2d();
       }
     };
 
@@ -974,6 +1001,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       }
       dragActive = false;
       syncShiftFromEvent(e);
+      syncAltFromEvent(e);
       const shiftPick =
         !wasDrag &&
         (e.shiftKey || (typeof e.getModifierState === "function" && e.getModifierState("Shift")));
@@ -987,7 +1015,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
             else if (!shiftPick) {
               nip.pickGraphIndex(gid);
               diskHoverEdgeRef.current.gid = -1;
-              refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+              bumpHoverNeighborEdges2d();
               hideNodeTip();
               skipHoverRefresh = true;
             }
@@ -1000,14 +1028,14 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         diskHoverEdgeRef.current.gid = gid ?? -1;
         if (gid === null) hideNodeTip();
         else showNodeTip(e, nip.tooltipForGraphIndex(gid));
-        refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+        bumpHoverNeighborEdges2d();
       } else if (!skipHoverRefresh) hideNodeTip();
     };
 
     const onPointerLeave = () => {
       hideNodeTip();
       diskHoverEdgeRef.current.gid = -1;
-      refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
+      bumpHoverNeighborEdges2d();
     };
 
     const loop = () => {
@@ -1045,7 +1073,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         el.addEventListener("pointerup", onPointerUp);
         el.addEventListener("pointercancel", onPointerUp);
         el.addEventListener("pointerleave", onPointerLeave);
-        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+        applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
         syncSeedLabelDom(ctx, sceneRef.current, showLabelsRef.current);
         loop();
       } catch (e) {
@@ -1072,7 +1100,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("pointercancel", onPointerUp);
       renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
-      applyBuffers(ctx, null, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+      applyBuffers(ctx, null, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       syncSeedLabelDom(ctx, null, false);
       renderer.dispose();
       ctxRef.current = null;
@@ -1084,7 +1112,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
     /* Keep Euclidean pan/zoom and viewer Möbius across focus/scene buffer updates; use Reset view to clear. */
-    applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef);
+    applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
   }, [
     scene,
@@ -1098,15 +1126,15 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
     nodeMinMul,
     edgeOpacity,
     webGpuError,
-    showHoverNeighborEdges,
     hoverNeighborGraph,
   ]);
 
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
+    diskHoverEdgeRef.current.enabled = altNeighborHoverRef.current;
     refreshHoverNeighborEdges2d(ctx, diskViewTransformRef, diskHoverEdgeRef.current);
-  }, [showHoverNeighborEdges, hoverNeighborGraph, webGpuError]);
+  }, [hoverNeighborGraph, webGpuError]);
 
   useEffect(() => {
     const ctx = ctxRef.current;
