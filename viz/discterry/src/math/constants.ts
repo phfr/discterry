@@ -17,7 +17,7 @@ export const GEODESIC_N = 96;
 export const BACKGROUND_NONSEED_EDGE_MAX = 25_000;
 
 /** Skip drawing edges if an endpoint has |z| >= this in the original disk (notebook uses 0.999). */
-export const EDGE_Z_BOUND = 0.99999 ;
+export const EDGE_Z_BOUND = 0.9999 ;
 
 /** Default rim margin: hide nodes with |W| > 1 - RIM_CULL_EPS after Möbius (display-only). */
 export const RIM_CULL_EPS = 0;
