@@ -1558,23 +1558,17 @@ export default function App() {
               </button>
             </div>
             <div className="shortcutsHelpBody">
-
+              <p>By default we render all network nodes (green dots), at top left you can enter a set of nodes that get highlighted red, also their edges get drawn</p>
+              <p>To focus on a node click on it in the list or search for it in the top bar.</p>
+              <p>For more control use advanced configuration at the top right. </p>
               <h3 className="shortcutsHelpSectionTitle">General</h3>
               <ul className="shortcutsHelpList">
                 <li>
                   <kbd>I</kbd> — Show or hide this panel
                 </li>
                 <li>
-                  Top <strong>Search</strong> — Filter genes by name; <kbd>↑</kbd>/<kbd>↓</kbd> highlight,{" "}
-                  <kbd>Enter</kbd> to focus, <kbd>Esc</kbd> to clear
-                </li>
-                <li>
                   <kbd>Shift</kbd>+<kbd>M</kbd> — Toggle 2D disk vs 3D ball dataset (URL <code>#3d</code>)
                 </li>
-              </ul>
-
-              <h3 className="shortcutsHelpSectionTitle">Main chart (when WebGPU is available)</h3>
-              <ul className="shortcutsHelpList">
                 <li>
                   <kbd>R</kbd> — Reset camera (disk pan/zoom/Möbius or ball orbit)
                 </li>
