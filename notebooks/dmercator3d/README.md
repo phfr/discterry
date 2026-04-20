@@ -21,7 +21,7 @@ Start Jupyter with **cwd = `notebooks/dmercator3d/`** so local imports resolve (
 
 ## Cached data
 
-Notebook **`00`** writes **`cache/merged.parquet`** (coordinates + graph **degree**). Later notebooks load this file to avoid re-parsing `inf_coord`. The `cache/` directory is gitignored (see [`.gitignore`](.gitignore)).
+Notebook **`00`** writes **`cache/merged.parquet`** (coordinates + graph **degree**). Later notebooks load this file to avoid re-parsing `inf_coord`. The `cache/` directory is **tracked in git** so clones can run downstream notebooks without re-running **`00`** (regenerate and commit when inputs change).
 
 ## Notebooks (suggested order)
 
