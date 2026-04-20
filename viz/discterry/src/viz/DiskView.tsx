@@ -931,7 +931,22 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
         );
         applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       } else {
-        tr.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, tr.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
+        const el = renderer.domElement;
+        const rect = el.getBoundingClientRect();
+        const rw = Math.max(1, rect.width);
+        const rh = Math.max(1, rect.height);
+        const ndcX = ((e.clientX - rect.left) / rw) * 2 - 1;
+        const ndcY = -((e.clientY - rect.top) / rh) * 2 + 1;
+
+        const zoom0 = tr.zoom;
+        const zoom1 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom0 * Math.exp(-e.deltaY * WHEEL_ZOOM_SENS)));
+        if (zoom1 !== zoom0) {
+          const half0 = BASE_HALF_EXTENT / zoom0;
+          const half1 = BASE_HALF_EXTENT / zoom1;
+          tr.panX += ndcX * (half0 - half1);
+          tr.panY += ndcY * (half0 - half1);
+          tr.zoom = zoom1;
+        }
         updateOrthographicCamera(camera, tr);
         applyBuffers(ctx, sceneRef.current, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
       }
