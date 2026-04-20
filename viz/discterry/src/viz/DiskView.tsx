@@ -1111,7 +1111,7 @@ export const DiskView = forwardRef<DiskViewHandle, Props>(function DiskView(
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx || webGpuError) return;
-    /* Keep Euclidean pan/zoom and viewer Möbius across focus/scene buffer updates; use Reset view to clear. */
+    /* Keep Euclidean pan/zoom and viewer Möbius across focus/scene buffer updates; press R to reset. */
     applyBuffers(ctx, scene, diskDisplayRef, diskViewTransformRef, pathOverlayRef, diskHoverEdgeRef, altNeighborHoverRef);
     syncSeedLabelDom(ctx, scene, showSeedLabels);
   }, [

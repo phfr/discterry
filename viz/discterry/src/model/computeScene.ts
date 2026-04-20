@@ -8,6 +8,9 @@ import { buildSeedMask, classifySeedEdges } from "./graphFilter";
 /** Which non-seed vertices get green disk markers (edges are always seed-touching only). */
 export type NonSeedShowMode = "all" | "seed_only" | "seed_and_neighbors";
 
+/** Seed–seed (red) vs all seed-touching (red + blue one-seed) geodesics. */
+export type SeedEdgeDisplayMode = "seed_connected" | "seed_all";
+
 function includeGreenNonSeed(mode: NonSeedShowMode, seedEdgeVertex: Uint8Array, i: number): boolean {
   if (mode === "all") return true;
   if (mode === "seed_only") return false;
@@ -65,6 +68,7 @@ export function computeScene(
   seedNames: Set<string>,
   rimCullEps: number,
   nonSeedShowMode: NonSeedShowMode,
+  seedEdgeDisplayMode: SeedEdgeDisplayMode,
   drawAllNonSeedEdges: boolean,
 ): SceneBuffers {
   const { x: zx, y: zy, src, dst, nameToIndex } = bundle;
@@ -124,11 +128,12 @@ export function computeScene(
 
   const vertsPerEdge = (GEODESIC_N - 1) * 2 * 3;
   const lineBothPositions = new Float32Array(both.length * vertsPerEdge);
-  const lineOnePositions = new Float32Array(one.length * vertsPerEdge);
+  const drawOneSeedEdges = seedEdgeDisplayMode === "seed_all";
+  const lineOnePositions = new Float32Array(drawOneSeedEdges ? one.length * vertsPerEdge : 0);
   const ob = { i: 0 };
   const oo = { i: 0 };
 
-  const edgesTouching = both.length + one.length;
+  const edgesTouchingDraw = drawOneSeedEdges ? both.length + one.length : both.length;
   let drawnBoth = 0;
   let drawnOne = 0;
   for (const ei of both) {
@@ -136,10 +141,12 @@ export function computeScene(
     appendGeodesicLineSegments(zx, zy, z0, src[ei], dst[ei], lineBothPositions, ob);
     if (ob.i > before) drawnBoth++;
   }
-  for (const ei of one) {
-    const before = oo.i;
-    appendGeodesicLineSegments(zx, zy, z0, src[ei], dst[ei], lineOnePositions, oo);
-    if (oo.i > before) drawnOne++;
+  if (drawOneSeedEdges) {
+    for (const ei of one) {
+      const before = oo.i;
+      appendGeodesicLineSegments(zx, zy, z0, src[ei], dst[ei], lineOnePositions, oo);
+      if (oo.i > before) drawnOne++;
+    }
   }
 
   const none: number[] = [];
@@ -198,9 +205,9 @@ export function computeScene(
       nodesHiddenRim: hiddenNonSeed,
       nodesSparedSeedRim: sparedSeed,
       nodesSparedSeedEdgeRim: sparedEdge,
-      edgesSeedTouching: edgesTouching,
+      edgesSeedTouching: edgesTouchingDraw,
       edgesDrawn,
-      edgesSkippedBoundary: edgesTouching - edgesDrawn,
+      edgesSkippedBoundary: edgesTouchingDraw - edgesDrawn,
       edgesBackgroundDrawn: drawnBg,
       edgesBackgroundPool: drawAllNonSeedEdges ? bgPool : 0,
       edgesBackgroundSubmitted: drawAllNonSeedEdges ? bgSubmitted : 0,

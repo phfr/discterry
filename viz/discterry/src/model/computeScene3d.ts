@@ -3,7 +3,7 @@ import { mobiusBallArrays } from "../math/poincareBall";
 import type { GraphBundle3d } from "../data/loadBundle3d";
 import { appendGeodesicLineSegments3d } from "./geodesicLineBuffer3d";
 import { buildSeedMask, classifySeedEdges } from "./graphFilter";
-import type { NonSeedShowMode, SceneStats } from "./computeScene";
+import type { NonSeedShowMode, SceneStats, SeedEdgeDisplayMode } from "./computeScene";
 
 function includeGreenNonSeed(mode: NonSeedShowMode, seedEdgeVertex: Uint8Array, i: number): boolean {
   if (mode === "all") return true;
@@ -36,6 +36,7 @@ export function computeScene3d(
   seedNames: Set<string>,
   rimCullEps: number,
   nonSeedShowMode: NonSeedShowMode,
+  seedEdgeDisplayMode: SeedEdgeDisplayMode,
   drawAllNonSeedEdges: boolean,
 ): SceneBuffers3d {
   const { x: px, y: py, z: pz, src, dst, nameToIndex } = bundle;
@@ -96,11 +97,12 @@ export function computeScene3d(
 
   const vertsPerEdge = (GEODESIC_N - 1) * 2 * 3;
   const lineBothPositions = new Float32Array(both.length * vertsPerEdge);
-  const lineOnePositions = new Float32Array(one.length * vertsPerEdge);
+  const drawOneSeedEdges = seedEdgeDisplayMode === "seed_all";
+  const lineOnePositions = new Float32Array(drawOneSeedEdges ? one.length * vertsPerEdge : 0);
   const ob = { i: 0 };
   const oo = { i: 0 };
 
-  const edgesTouching = both.length + one.length;
+  const edgesTouchingDraw = drawOneSeedEdges ? both.length + one.length : both.length;
   let drawnBoth = 0;
   let drawnOne = 0;
   for (const ei of both) {
@@ -108,10 +110,12 @@ export function computeScene3d(
     appendGeodesicLineSegments3d(px, py, pz, p0x, p0y, p0z, src[ei], dst[ei], lineBothPositions, ob);
     if (ob.i > before) drawnBoth++;
   }
-  for (const ei of one) {
-    const before = oo.i;
-    appendGeodesicLineSegments3d(px, py, pz, p0x, p0y, p0z, src[ei], dst[ei], lineOnePositions, oo);
-    if (oo.i > before) drawnOne++;
+  if (drawOneSeedEdges) {
+    for (const ei of one) {
+      const before = oo.i;
+      appendGeodesicLineSegments3d(px, py, pz, p0x, p0y, p0z, src[ei], dst[ei], lineOnePositions, oo);
+      if (oo.i > before) drawnOne++;
+    }
   }
 
   const none: number[] = [];
@@ -170,9 +174,9 @@ export function computeScene3d(
       nodesHiddenRim: hiddenNonSeed,
       nodesSparedSeedRim: sparedSeed,
       nodesSparedSeedEdgeRim: sparedEdge,
-      edgesSeedTouching: edgesTouching,
+      edgesSeedTouching: edgesTouchingDraw,
       edgesDrawn,
-      edgesSkippedBoundary: edgesTouching - edgesDrawn,
+      edgesSkippedBoundary: edgesTouchingDraw - edgesDrawn,
       edgesBackgroundDrawn: drawnBg,
       edgesBackgroundPool: drawAllNonSeedEdges ? bgPool : 0,
       edgesBackgroundSubmitted: drawAllNonSeedEdges ? bgSubmitted : 0,

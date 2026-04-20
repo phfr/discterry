@@ -80,47 +80,6 @@ export function bfsShortestPath(csr: GraphCSR, start: number, goal: number): num
   return null;
 }
 
-/** `parent[v]` is predecessor on BFS tree, or `-1` if unreachable; `parent[root] === root`. */
-export function bfsParentTree(csr: GraphCSR, root: number): Int32Array {
-  const parent = new Int32Array(csr.n);
-  parent.fill(-1);
-  if (root < 0 || root >= csr.n) return parent;
-  const q = new Int32Array(csr.n);
-  let qh = 0;
-  let qt = 0;
-  parent[root] = root;
-  q[qt++] = root;
-  while (qh < qt) {
-    const u = q[qh++]!;
-    const r0 = csr.rowOff[u]!;
-    const r1 = csr.rowOff[u + 1]!;
-    for (let e = r0; e < r1; e++) {
-      const v = csr.colInd[e]!;
-      if (parent[v] !== -1) continue;
-      parent[v] = u;
-      q[qt++] = v;
-    }
-  }
-  return parent;
-}
-
-export function collectFilteredBfsTreeEdges(
-  parent: Int32Array,
-  root: number,
-  allowed: ReadonlySet<number> | null,
-  maxEdges: number,
-): [number, number][] {
-  const out: [number, number][] = [];
-  for (let c = 0; c < parent.length && out.length < maxEdges; c++) {
-    if (c === root) continue;
-    const p = parent[c]!;
-    if (p < 0 || p === c) continue;
-    if (allowed !== null && !allowed.has(c)) continue;
-    out.push([p, c]);
-  }
-  return out;
-}
-
 /** Hyperbolic distance in the Poincaré disk between two W-plane points (after focus map). */
 export function poincareDiskDistance(wx0: number, wy0: number, wx1: number, wy1: number): number {
   const r0 = wx0 * wx0 + wy0 * wy0;

@@ -1,40 +1,22 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { GraphBundle } from "../data/loadBundle";
 import type { GraphBundle3d } from "../data/loadBundle3d";
 import type { Complex } from "../math/mobius";
-import {
-  PRIM_MAX_SEEDS,
-  bfsParentTree,
-  bfsShortestPath,
-  collectFilteredBfsTreeEdges,
-  type GraphCSR,
-} from "../model/graphSearch";
+import { PRIM_MAX_SEEDS, bfsShortestPath, type GraphCSR } from "../model/graphSearch";
 import { tryBuildPrimMstOverlay, tryBuildPrimMstOverlay3d } from "../model/primMstOverlay";
 import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
-import {
-  buildPathOverlayFromEdges,
-  buildPathOverlayFromEdges3d,
-  buildPathOverlayFromVertexPath,
-  buildPathOverlayFromVertexPath3d,
-} from "../model/pathOverlayBuffer";
-import type { SceneBuffers } from "../model/computeScene";
-import type { SceneBuffers3d } from "../model/computeScene3d";
-
+import { buildPathOverlayFromVertexPath, buildPathOverlayFromVertexPath3d } from "../model/pathOverlayBuffer";
 type TabId = "graph" | "geometry";
-
-const BFS_TREE_MAX_DRAW_EDGES = 8000;
 
 type Props = {
   open: boolean;
   onClose: () => void;
   bundle: GraphBundle | GraphBundle3d | null;
-  scene: SceneBuffers | SceneBuffers3d | null;
   chartMode: "2d" | "3d";
   z0: Complex | null;
   p0Ball: { x: number; y: number; z: number } | null;
   csr: GraphCSR | null;
   pickerNames: string[];
-  appliedFocus: string;
   appliedSeedsText: string;
   onPathOverlayChange: (overlay: PathOverlayBuffer | null) => void;
 };
@@ -43,13 +25,11 @@ export function PathTreesFloater({
   open,
   onClose,
   bundle,
-  scene,
   chartMode,
   z0,
   p0Ball,
   csr,
   pickerNames,
-  appliedFocus,
   appliedSeedsText,
   onPathOverlayChange,
 }: Props) {
@@ -70,14 +50,6 @@ export function PathTreesFloater({
       : pickerNames.length > 1
         ? pickerNames[1]!
         : (pickerNames[0] ?? "");
-
-  const renderedVertexSet = useMemo(() => {
-    if (!scene) return null;
-    const s = new Set<number>();
-    for (let i = 0; i < scene.seedGraphIndex.length; i++) s.add(scene.seedGraphIndex[i]!);
-    for (let i = 0; i < scene.otherGraphIndex.length; i++) s.add(scene.otherGraphIndex[i]!);
-    return s;
-  }, [scene]);
 
   const clearOverlay = () => {
     onPathOverlayChange(null);
@@ -143,47 +115,6 @@ export function PathTreesFloater({
     }
     onPathOverlayChange(buf);
     setMsg(`Shortest path: ${path.length} vertices.`);
-  };
-
-  const showBfsTree = () => {
-    setMsg(null);
-    if (!bundle || !csr) {
-      setMsg("Graph not ready.");
-      return;
-    }
-    if (chartMode === "3d" && !p0Ball) {
-      setMsg("Ball focus not ready.");
-      return;
-    }
-    if (chartMode === "2d" && !z0) {
-      setMsg("Graph not ready.");
-      return;
-    }
-    const root = bundle.nameToIndex.get(appliedFocus.trim());
-    if (root === undefined) {
-      setMsg("Focus protein not in graph.");
-      return;
-    }
-    const parent = bfsParentTree(csr, root);
-    const edges = collectFilteredBfsTreeEdges(parent, root, renderedVertexSet, BFS_TREE_MAX_DRAW_EDGES);
-    if (edges.length === 0) {
-      setMsg("No tree edges to draw (try widening seeds / show nodes).");
-      onPathOverlayChange(null);
-      return;
-    }
-    let buf: PathOverlayBuffer | null = null;
-    if (chartMode === "3d" && p0Ball) {
-      buf = buildPathOverlayFromEdges3d(bundle as GraphBundle3d, p0Ball.x, p0Ball.y, p0Ball.z, edges);
-    } else if (z0) {
-      buf = buildPathOverlayFromEdges(bundle as GraphBundle, z0, edges);
-    }
-    if (!buf) {
-      setMsg("Tree edges skipped by boundary clip.");
-      onPathOverlayChange(null);
-      return;
-    }
-    onPathOverlayChange(buf);
-    setMsg(`BFS tree from focus: ${edges.length} edges (capped / filtered to current view).`);
   };
 
   const showPrimMst = () => {
@@ -351,17 +282,13 @@ export function PathTreesFloater({
               <button type="button" className="pathTreesBtn" onClick={showShortestPath}>
                 Show shortest path
               </button>
-              <button type="button" className="pathTreesBtn" onClick={showBfsTree}>
-                BFS tree from focus
-              </button>
               <button type="button" className="pathTreesBtn pathTreesBtnGhost" onClick={clearOverlay}>
                 Clear overlay
               </button>
             </div>
             <p className="pathTreesHint">
-              BFS tree edges are limited to children that appear in the{" "}
-              <strong>{chartMode === "3d" ? "current ball view" : "current disk view"}</strong> (green + red
-              markers), up to {BFS_TREE_MAX_DRAW_EDGES} edges.
+              Shortest path is the BFS shortest route in the abstract graph, drawn as hyperbolic geodesics in the
+              current {chartMode === "3d" ? "ball" : "disk"} view.
             </p>
           </div>
         ) : null}
