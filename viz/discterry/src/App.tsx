@@ -1,29 +1,53 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import "./App.css";
 import { loadGraphBundle, loadMeta, type GraphBundle, type MetaJson } from "./data/loadBundle";
+import { loadGraphBundle3d, loadMeta3d, type GraphBundle3d } from "./data/loadBundle3d";
 import { RIM_CULL_EPS, RIM_CULL_EPS_SLIDER_MAX } from "./math/constants";
 import {
   easeInOutCubic,
+  fillP0BallGeodesic,
   fillZ0Geodesic,
+  p0AtBallGeodesicParameter,
+  P0_GEODESIC_SAMPLES,
   z0AtGeodesicParameter,
   Z0_GEODESIC_SAMPLES,
 } from "./math/focusAnimPath";
-import type { Complex } from "./math/mobius";
+import { clampZ0, type Complex } from "./math/mobius";
 import {
   computeScene,
   type NonSeedShowMode,
   type SceneBuffers,
   type SceneStats,
+  type SeedEdgeDisplayMode,
 } from "./model/computeScene";
+import { computeScene3d, type SceneBuffers3d } from "./model/computeScene3d";
 import { bundleToCSR } from "./model/graphSearch";
-import { tryBuildPrimMstOverlay } from "./model/primMstOverlay";
+import type { HoverNeighborGraph2d, HoverNeighborGraph3d } from "./model/hoverNeighborEdgePositions";
+import { tryBuildPrimMstOverlay, tryBuildPrimMstOverlay3d } from "./model/primMstOverlay";
 import type { PathOverlayBuffer } from "./model/pathOverlayBuffer";
 import { z0FromProtein } from "./z0FromProtein";
-import { nodeDiskHoverTooltipForIndex, nodeListTooltip } from "./nodeListTooltip";
+import { p0FromProtein, type Vec3 } from "./p0FromProtein";
+import {
+  nodeDiskHoverTooltipForGraph3d,
+  nodeDiskHoverTooltipForIndex,
+  nodeListTooltip,
+  nodeListTooltip3d,
+} from "./nodeListTooltip";
 import { analysisKeyboardGuard } from "./analysisKeyboardGuard";
 import { AnalysisFloater } from "./viz/AnalysisFloater";
+import { BallView3d, type BallView3dHandle, type BallView3dNodeInteraction } from "./viz/BallView3d";
 import { DiskView, type DiskViewHandle, type DiskViewNodeInteraction } from "./viz/DiskView";
 import { PathTreesFloater } from "./viz/PathTreesFloater";
+import type { Minimap2dMode, Minimap3dMode } from "./viz/minimapChart";
+import { GraphMinimap } from "./viz/GraphMinimap";
 
 const DEFAULT_RADIAL_SCALE_MIN = 0.2;
 const DEFAULT_RADIAL_SCALE_MAX = 1.3;
@@ -43,11 +67,13 @@ function parseSeeds(text: string): Set<string> {
   return s;
 }
 
+/** WebGPU attaches `navigator.gpu`; it is not on TypeScript's default `Navigator` type. */
 function webGpuSupported(): boolean {
-  return typeof navigator !== "undefined" && !!navigator.gpu;
+  if (typeof navigator === "undefined") return false;
+  return Boolean((navigator as Navigator & { gpu?: unknown }).gpu);
 }
 
-function vertexDegrees(bundle: GraphBundle): Int32Array {
+function vertexDegrees(bundle: { src: Int32Array; dst: Int32Array; vertex: string[] }): Int32Array {
   const n = bundle.vertex.length;
   const d = new Int32Array(n);
   const { src, dst } = bundle;
@@ -58,12 +84,12 @@ function vertexDegrees(bundle: GraphBundle): Int32Array {
   return d;
 }
 
-/** Sorted clickable names: valid applied seeds, plus current focus if in bundle but not listed. */
-function focusPickerNames(bundle: GraphBundle, appliedSeedsText: string, appliedFocus: string): string[] {
+/** Sorted clickable names: applied seeds valid for the bundle. */
+function focusPickerNames(
+  bundle: { nameToIndex: Map<string, number> },
+  appliedSeedsText: string,
+): string[] {
   const seeds = [...parseSeeds(appliedSeedsText)].filter((n) => bundle.nameToIndex.has(n));
-  const set = new Set(seeds);
-  const f = appliedFocus.trim();
-  if (f && bundle.nameToIndex.has(f) && !set.has(f)) seeds.push(f);
   seeds.sort((a, b) => a.localeCompare(b));
   return seeds;
 }
@@ -87,7 +113,10 @@ function filterVertexNames(vertices: readonly string[], query: string, max: numb
 }
 
 /** Applied seed names in first-seen order (from applied text), bundle-valid only. */
-function appliedSeedNamesOrdered(bundle: GraphBundle, appliedSeedsText: string): string[] {
+function appliedSeedNamesOrdered(
+  bundle: { vertex: string[]; nameToIndex: Map<string, number> },
+  appliedSeedsText: string,
+): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const part of appliedSeedsText.split(/\s+/)) {
@@ -100,7 +129,11 @@ function appliedSeedNamesOrdered(bundle: GraphBundle, appliedSeedsText: string):
 }
 
 export default function App() {
+  const [dataMode, setDataMode] = useState<"2d" | "3d">(() =>
+    typeof window !== "undefined" && window.location.hash === "#3d" ? "3d" : "2d",
+  );
   const [bundle, setBundle] = useState<GraphBundle | null>(null);
+  const [bundle3d, setBundle3d] = useState<GraphBundle3d | null>(null);
   const [runMeta, setRunMeta] = useState<MetaJson | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [seedsDraft, setSeedsDraft] = useState("");
@@ -116,26 +149,49 @@ export default function App() {
   const [nodeSizeMul, setNodeSizeMul] = useState(DEFAULT_NODE_SIZE_MUL);
   const [compensateZoomNodes, setCompensateZoomNodes] = useState(true);
   const [nodeMinMul, setNodeMinMul] = useState(DEFAULT_NODE_MIN_MUL);
+  const [edgeOpacity, setEdgeOpacity] = useState(0.45);
   const [nonSeedShowMode, setNonSeedShowMode] = useState<NonSeedShowMode>("all");
+  const [seedEdgeDisplayMode, setSeedEdgeDisplayMode] = useState<SeedEdgeDisplayMode>("seed_all");
   const [focusAnimTarget, setFocusAnimTarget] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [pathTreesOpen, setPathTreesOpen] = useState(false);
   /** Shift+U: draw all graph edges; non-seed–non-seed segments are faint light orange (see DiskView). */
   const [showAllGraphEdges, setShowAllGraphEdges] = useState(false);
+  const [minimapVisible, setMinimapVisible] = useState(true);
+  const [minimap2dMode, setMinimap2dMode] = useState<Minimap2dMode>("native_disk");
+  const [minimap3dMode, setMinimap3dMode] = useState<Minimap3dMode>("stereo_north");
+  const [shortcutsHelpOpen, setShortcutsHelpOpen] = useState(false);
+  const shortcutsHelpOpenRef = useRef(false);
+  const [seedPanelOpen, setSeedPanelOpen] = useState(true);
+  /** Row highlight in seed list: list clicks, or main-viz pick only when that vertex is already a seed. */
+  const [seedListHighlightName, setSeedListHighlightName] = useState("");
+  /** When set, main chart origin follows minimap click (native Z / stereo), not the focused protein’s disk/ball point. */
+  const [chartOrigin2dOverride, setChartOrigin2dOverride] = useState<Complex | null>(null);
+  const [chartOrigin3dOverride, setChartOrigin3dOverride] = useState<Vec3 | null>(null);
   const [focusSearch, setFocusSearch] = useState("");
   const [focusSearchHl, setFocusSearchHl] = useState(0);
   const diskViewRef = useRef<DiskViewHandle>(null);
-  const nodeInteractionRef = useRef<DiskViewNodeInteraction | null>(null);
+  const ballViewRef = useRef<BallView3dHandle>(null);
+  const nodeInteractionRef = useRef<DiskViewNodeInteraction | BallView3dNodeInteraction | null>(null);
   const appliedFocusRef = useRef(appliedFocus);
+  const appliedSeedsTextRef = useRef(appliedSeedsText);
+  const seedsDraftRef = useRef(seedsDraft);
   const focusAnimTargetRef = useRef<string | null>(null);
   const focusAnimGenRef = useRef(0);
   const focusAnimRafRef = useRef(0);
   const isFocusAnimatingRef = useRef(false);
   const z0AnimRef = useRef<Complex | null>(null);
+  const p0AnimRef = useRef<Vec3 | null>(null);
 
   useLayoutEffect(() => {
     appliedFocusRef.current = appliedFocus;
   }, [appliedFocus]);
+  useLayoutEffect(() => {
+    appliedSeedsTextRef.current = appliedSeedsText;
+  }, [appliedSeedsText]);
+  useLayoutEffect(() => {
+    seedsDraftRef.current = seedsDraft;
+  }, [seedsDraft]);
   useLayoutEffect(() => {
     focusAnimTargetRef.current = focusAnimTarget;
   }, [focusAnimTarget]);
@@ -152,21 +208,105 @@ export default function App() {
   );
 
   useEffect(() => {
+    const onHash = () => {
+      const next = window.location.hash === "#3d" ? "3d" : "2d";
+      setDataMode((m) => (m === next ? m : next));
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  useEffect(() => {
+    setChartOrigin2dOverride(null);
+    setChartOrigin3dOverride(null);
+  }, [dataMode]);
+
+  useLayoutEffect(() => {
+    shortcutsHelpOpenRef.current = shortcutsHelpOpen;
+  }, [shortcutsHelpOpen]);
+
+  /** I: shortcuts overlay. Esc closes it while open (even if a text field is focused). */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === "Escape" && shortcutsHelpOpenRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShortcutsHelpOpen(false);
+        return;
+      }
+      if (analysisKeyboardGuard(e)) return;
+      if (e.code === "KeyI") {
+        e.preventDefault();
+        setShortcutsHelpOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  /** Shift+M: toggle 2D / 3D (`#3d` hash). Plain M on 2D disk: Prim MST overlay (see keydown handler below). */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (analysisKeyboardGuard(e)) return;
+      if (e.code !== "KeyM" || !e.shiftKey) return;
+      e.preventDefault();
+      window.location.hash = window.location.hash === "#3d" ? "" : "#3d";
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const [b, meta] = await Promise.all([
-          loadGraphBundle(import.meta.env.BASE_URL),
-          loadMeta(import.meta.env.BASE_URL),
-        ]);
-        if (cancelled) return;
-        setBundle(b);
-        setRunMeta(meta ?? null);
+        const base = import.meta.env.BASE_URL;
+        const seedsSnapshot = appliedSeedsTextRef.current;
+        const draftSnapshot = seedsDraftRef.current;
+        const focusSnapshot = appliedFocusRef.current;
+
+        type Loaded = GraphBundle | GraphBundle3d;
+        let b: Loaded;
+        let meta: MetaJson | null;
+        if (dataMode === "3d") {
+          const [g, m] = await Promise.all([loadGraphBundle3d(base), loadMeta3d(base)]);
+          if (cancelled) return;
+          setBundle(null);
+          setBundle3d(g);
+          b = g;
+          meta = m ?? null;
+        } else {
+          const [g, m] = await Promise.all([loadGraphBundle(base), loadMeta(base)]);
+          if (cancelled) return;
+          setBundle3d(null);
+          setBundle(g);
+          b = g;
+          meta = m ?? null;
+        }
+
+        setRunMeta(meta);
         const defF = meta?.default_focus?.trim() || b.vertex[0] || "";
         const defSeeds = (meta?.default_seeds?.join(" ") || defF).replace(/\s+/g, " ").trim();
-        setSeedsDraft(defSeeds);
-        setAppliedFocus(defF);
-        setAppliedSeedsText(defSeeds);
+
+        const filterNamesToBundle = (text: string): string => {
+          const parts = text.split(/\s+/).map((p) => p.trim()).filter(Boolean);
+          const ok = parts.filter((p) => b.nameToIndex.has(p));
+          return ok.join(" ");
+        };
+
+        const mergedSubset = draftSnapshot.trim() || seedsSnapshot.trim();
+        const kept = filterNamesToBundle(mergedSubset);
+        const seedsToApply = kept.length > 0 ? kept : defSeeds;
+
+        let focusTo = focusSnapshot.trim();
+        if (!focusTo || !b.nameToIndex.has(focusTo)) {
+          const sp = parseSeeds(seedsToApply);
+          focusTo = [...sp].find((n) => b.nameToIndex.has(n)) ?? defF;
+        }
+
+        setSeedsDraft(seedsToApply);
+        setAppliedSeedsText(seedsToApply);
+        setAppliedFocus(focusTo);
         setLoadErr(null);
       } catch (e) {
         if (!cancelled) setLoadErr(e instanceof Error ? e.message : String(e));
@@ -175,7 +315,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dataMode]);
 
   useEffect(() => {
     if (!isFocusAnimatingRef.current) return;
@@ -184,7 +324,14 @@ export default function App() {
     isFocusAnimatingRef.current = false;
     setFocusAnimTarget(null);
     z0AnimRef.current = null;
-  }, [appliedSeedsText, rimCullEps, bundle, nonSeedShowMode]);
+    p0AnimRef.current = null;
+  }, [appliedSeedsText, rimCullEps, bundle, bundle3d, nonSeedShowMode, seedEdgeDisplayMode]);
+
+  useEffect(() => {
+    const h = seedListHighlightName.trim();
+    if (!h) return;
+    if (!parseSeeds(appliedSeedsText).has(h)) setSeedListHighlightName("");
+  }, [appliedSeedsText, seedListHighlightName]);
 
   useEffect(() => {
     return () => {
@@ -194,23 +341,79 @@ export default function App() {
   }, []);
 
   const z0Current = useMemo(() => {
-    if (!bundle || !appliedFocus.trim()) return null;
+    if (!bundle) return null;
+    if (chartOrigin2dOverride !== null) return clampZ0(chartOrigin2dOverride);
+    if (!appliedFocus.trim()) return null;
     try {
       return z0FromProtein(bundle, appliedFocus);
     } catch {
       return null;
     }
-  }, [bundle, appliedFocus]);
+  }, [bundle, appliedFocus, chartOrigin2dOverride]);
 
-  const graphCSR = useMemo(() => (bundle ? bundleToCSR(bundle) : null), [bundle]);
+  const p0Ball = useMemo(() => {
+    if (!bundle3d) return null;
+    if (chartOrigin3dOverride !== null) return chartOrigin3dOverride;
+    if (!appliedFocus.trim()) return null;
+    try {
+      return p0FromProtein(bundle3d, appliedFocus);
+    } catch {
+      return null;
+    }
+  }, [bundle3d, appliedFocus, chartOrigin3dOverride]);
 
-  const graphInteractionKey = useMemo(
-    () =>
-      bundle
-        ? `${bundle.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}`
-        : "",
-    [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode],
-  );
+  const graphCSR = useMemo(() => {
+    if (bundle) return bundleToCSR(bundle);
+    if (bundle3d) return bundleToCSR(bundle3d);
+    return null;
+  }, [bundle, bundle3d]);
+
+  const hoverNeighborGraph2d = useMemo((): HoverNeighborGraph2d | null => {
+    if (!bundle || !graphCSR || !z0Current) return null;
+    return { csr: graphCSR, zx: bundle.x, zy: bundle.y, z0: z0Current };
+  }, [bundle, graphCSR, z0Current]);
+
+  const hoverNeighborGraph3d = useMemo((): HoverNeighborGraph3d | null => {
+    if (!bundle3d || !graphCSR || !p0Ball) return null;
+    return {
+      csr: graphCSR,
+      px: bundle3d.x,
+      py: bundle3d.y,
+      pz: bundle3d.z,
+      p0x: p0Ball.x,
+      p0y: p0Ball.y,
+      p0z: p0Ball.z,
+    };
+  }, [bundle3d, graphCSR, p0Ball]);
+
+  const graphInteractionKey = useMemo(() => {
+    const o2 =
+      chartOrigin2dOverride !== null
+        ? `|z0o:${chartOrigin2dOverride.re.toFixed(4)},${chartOrigin2dOverride.im.toFixed(4)}`
+        : "";
+    const o3 =
+      chartOrigin3dOverride !== null
+        ? `|p0o:${chartOrigin3dOverride.x.toFixed(4)},${chartOrigin3dOverride.y.toFixed(4)},${chartOrigin3dOverride.z.toFixed(4)}`
+        : "";
+    if (dataMode === "3d" && bundle3d) {
+      return `3d|${bundle3d.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}|${seedEdgeDisplayMode}${o3}`;
+    }
+    if (bundle) {
+      return `2d|${bundle.vertex.length}|${appliedFocus}|${appliedSeedsText}|${rimCullEps}|${nonSeedShowMode}|${seedEdgeDisplayMode}${o2}`;
+    }
+    return "";
+  }, [
+    dataMode,
+    bundle,
+    bundle3d,
+    appliedFocus,
+    appliedSeedsText,
+    rimCullEps,
+    nonSeedShowMode,
+    seedEdgeDisplayMode,
+    chartOrigin2dOverride,
+    chartOrigin3dOverride,
+  ]);
 
   const [pathOverlayPinned, setPathOverlayPinned] = useState<{
     buf: PathOverlayBuffer;
@@ -238,6 +441,7 @@ export default function App() {
     cancelPrimMstFadeTimers();
     primMstFlashActiveRef.current = false;
     diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+    ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
     setPathOverlayPinned(null);
   }, [graphInteractionKey, cancelPrimMstFadeTimers]);
 
@@ -246,38 +450,81 @@ export default function App() {
       cancelPrimMstFadeTimers();
       primMstFlashActiveRef.current = false;
       diskViewRef.current?.setPathOverlayOpacityMultiplier(1);
+      ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
       setPathOverlayPinned(b && graphInteractionKey ? { buf: b, key: graphInteractionKey } : null);
     },
     [graphInteractionKey, cancelPrimMstFadeTimers],
   );
 
-  const scene: SceneBuffers | null = useMemo(() => {
-    if (!bundle || !appliedFocus.trim() || !z0Current) return null;
-    try {
-      const seeds = parseSeeds(appliedSeedsText);
-      if (seeds.size === 0) return null;
-      return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode, showAllGraphEdges);
-    } catch {
-      return null;
+  const scene: SceneBuffers | SceneBuffers3d | null = useMemo(() => {
+    const seeds = parseSeeds(appliedSeedsText);
+    if (seeds.size === 0) return null;
+    if (bundle3d && p0Ball) {
+      try {
+        return computeScene3d(
+          bundle3d,
+          p0Ball.x,
+          p0Ball.y,
+          p0Ball.z,
+          seeds,
+          rimCullEps,
+          nonSeedShowMode,
+          seedEdgeDisplayMode,
+          showAllGraphEdges,
+        );
+      } catch {
+        return null;
+      }
     }
-  }, [bundle, appliedFocus, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, z0Current]);
+    if (bundle && z0Current) {
+      try {
+        return computeScene(bundle, z0Current, seeds, rimCullEps, nonSeedShowMode, seedEdgeDisplayMode, showAllGraphEdges);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }, [
+    bundle,
+    bundle3d,
+    appliedSeedsText,
+    rimCullEps,
+    nonSeedShowMode,
+    seedEdgeDisplayMode,
+    showAllGraphEdges,
+    z0Current,
+    p0Ball,
+  ]);
+
+  const pickerGraph = bundle ?? bundle3d;
+  const minimapSeeds = useMemo(() => parseSeeds(appliedSeedsText), [appliedSeedsText]);
+
+  useEffect(() => {
+    if (!pickerGraph) {
+      setChartOrigin2dOverride(null);
+      setChartOrigin3dOverride(null);
+    }
+  }, [pickerGraph]);
 
   const pickerNames = useMemo(
-    () => (bundle ? focusPickerNames(bundle, appliedSeedsText, appliedFocus) : []),
-    [bundle, appliedSeedsText, appliedFocus],
+    () => (pickerGraph ? focusPickerNames(pickerGraph, appliedSeedsText) : []),
+    [pickerGraph, appliedSeedsText],
   );
 
-  const degrees = useMemo(() => (bundle ? vertexDegrees(bundle) : null), [bundle]);
+  const degrees = useMemo(
+    () => (pickerGraph ? vertexDegrees(pickerGraph) : null),
+    [pickerGraph],
+  );
 
   const analysisSeedOrder = useMemo(
-    () => (bundle ? appliedSeedNamesOrdered(bundle, appliedSeedsText) : []),
-    [bundle, appliedSeedsText],
+    () => (pickerGraph ? appliedSeedNamesOrdered(pickerGraph, appliedSeedsText) : []),
+    [pickerGraph, appliedSeedsText],
   );
 
   const focusSearchMatches = useMemo(() => {
-    if (!bundle) return [];
-    return filterVertexNames(bundle.vertex, focusSearch, FOCUS_SEARCH_MAX);
-  }, [bundle, focusSearch]);
+    if (!pickerGraph) return [];
+    return filterVertexNames(pickerGraph.vertex, focusSearch, FOCUS_SEARCH_MAX);
+  }, [pickerGraph, focusSearch]);
 
   useLayoutEffect(() => {
     setFocusSearchHl((i) => {
@@ -287,25 +534,80 @@ export default function App() {
   }, [focusSearchMatches]);
 
   useEffect(() => {
-    if (webGpuError || !bundle) return;
+    if (webGpuError) return;
     const onKey = (e: KeyboardEvent) => {
       if (analysisKeyboardGuard(e)) return;
+      if (e.code === "KeyA") {
+        e.preventDefault();
+        setAnalysisOpen((o) => !o);
+        return;
+      }
+      if (e.code === "KeyS") {
+        e.preventDefault();
+        setPathTreesOpen((o) => !o);
+        return;
+      }
+      if (bundle3d) {
+        if (e.code === "KeyR") {
+          e.preventDefault();
+          ballViewRef.current?.resetView();
+        } else if (e.code === "KeyF") {
+          e.preventDefault();
+          ballViewRef.current?.fitSubgraphToView();
+        } else if (e.code === "KeyU" && e.shiftKey) {
+          e.preventDefault();
+          setShowAllGraphEdges((o) => !o);
+        } else if (e.code === "KeyM" && !e.shiftKey) {
+          e.preventDefault();
+          if (!bundle3d || !p0Ball) return;
+          cancelPrimMstFadeTimers();
+          primMstFlashActiveRef.current = false;
+          const r = tryBuildPrimMstOverlay3d(
+            bundle3d,
+            p0Ball.x,
+            p0Ball.y,
+            p0Ball.z,
+            appliedSeedsText,
+          );
+          if (!r.ok) return;
+          primMstFlashActiveRef.current = true;
+          ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
+          setPathOverlayPinned({ buf: r.buf, key: graphInteractionKey });
+          primMstFadeTimeoutRef.current = setTimeout(() => {
+            primMstFadeTimeoutRef.current = null;
+            if (!primMstFlashActiveRef.current) return;
+            const t0 = performance.now();
+            const tick = (now: number) => {
+              if (!primMstFlashActiveRef.current) return;
+              const u = Math.min(1, (now - t0) / PRIM_MST_FLASH_FADE_MS);
+              ballViewRef.current?.setPathOverlayOpacityMultiplier(1 - u);
+              if (u < 1) {
+                primMstFadeRafRef.current = requestAnimationFrame(tick);
+              } else {
+                primMstFadeRafRef.current = 0;
+                if (primMstFlashActiveRef.current) {
+                  setPathOverlayPinned(null);
+                  primMstFlashActiveRef.current = false;
+                }
+                ballViewRef.current?.setPathOverlayOpacityMultiplier(1);
+              }
+            };
+            primMstFadeRafRef.current = requestAnimationFrame(tick);
+          }, PRIM_MST_FLASH_HOLD_MS);
+        }
+        return;
+      }
+      if (!bundle) return;
       if (e.code === "KeyR") {
         e.preventDefault();
         diskViewRef.current?.resetView();
       } else if (e.code === "KeyF") {
         e.preventDefault();
         diskViewRef.current?.fitSubgraphToView();
-      } else if (e.code === "KeyA") {
-        e.preventDefault();
-        setAnalysisOpen((o) => !o);
-      } else if (e.code === "KeyS") {
-        e.preventDefault();
-        setPathTreesOpen((o) => !o);
       } else if (e.code === "KeyU" && e.shiftKey) {
         e.preventDefault();
         setShowAllGraphEdges((o) => !o);
-      } else if (e.code === "KeyM") {
+      } else if (e.code === "KeyM" && !e.shiftKey) {
         e.preventDefault();
         if (!z0Current) return;
         cancelPrimMstFadeTimers();
@@ -347,7 +649,9 @@ export default function App() {
   }, [
     webGpuError,
     bundle,
+    bundle3d,
     z0Current,
+    p0Ball,
     appliedSeedsText,
     graphInteractionKey,
     cancelPrimMstFadeTimers,
@@ -356,13 +660,14 @@ export default function App() {
   const commitSeedsText = useCallback(
     (text: string): boolean => {
       setFormErr(null);
-      if (!bundle) return false;
+      const bg = bundle ?? bundle3d;
+      if (!bg) return false;
       const seeds = parseSeeds(text);
       if (seeds.size === 0) {
         setFormErr("Need ≥1 seed");
         return false;
       }
-      const unknown = [...seeds].filter((n) => !bundle.nameToIndex.has(n));
+      const unknown = [...seeds].filter((n) => !bg.nameToIndex.has(n));
       if (unknown.length) {
         setFormErr(`Unknown: ${unknown.slice(0, 5).join(", ")}`);
         return false;
@@ -370,13 +675,13 @@ export default function App() {
       setSeedsDraft(text);
       setAppliedSeedsText(text);
       const f = appliedFocus.trim();
-      if (!f || !seeds.has(f) || !bundle.nameToIndex.has(f)) {
-        const first = [...seeds].find((n) => bundle.nameToIndex.has(n));
+      if (!f || !seeds.has(f) || !bg.nameToIndex.has(f)) {
+        const first = [...seeds].find((n) => bg.nameToIndex.has(n));
         if (first) setAppliedFocus(first);
       }
       return true;
     },
-    [bundle, appliedFocus],
+    [bundle, bundle3d, appliedFocus],
   );
 
   const onApplySeeds = useCallback(() => {
@@ -385,8 +690,9 @@ export default function App() {
 
   const shiftPickGraphIndex = useCallback(
     (graphIndex: number) => {
-      if (!bundle || graphIndex < 0 || graphIndex >= bundle.vertex.length) return;
-      const name = bundle.vertex[graphIndex]!;
+      const bg = bundle ?? bundle3d;
+      if (!bg || graphIndex < 0 || graphIndex >= bg.vertex.length) return;
+      const name = bg.vertex[graphIndex]!;
       const seeds = parseSeeds(seedsDraft);
       if (seeds.has(name)) {
         const tokens = seedsDraft
@@ -405,15 +711,171 @@ export default function App() {
       const next = trimmed ? `${trimmed} ${name}` : name;
       commitSeedsText(next);
     },
-    [bundle, seedsDraft, commitSeedsText],
+    [bundle, bundle3d, seedsDraft, commitSeedsText],
   );
 
+  const onMinimapChart2d = useCallback((z: Complex) => {
+    setChartOrigin2dOverride(clampZ0(z));
+    requestAnimationFrame(() => {
+      diskViewRef.current?.recenterPreservingZoom();
+    });
+  }, []);
+
+  const onMinimapChart3d = useCallback((p: Vec3) => {
+    setChartOrigin3dOverride(p);
+  }, []);
+
   const onPickFocus = useCallback(
-    (name: string) => {
+    (
+      name: string,
+      opts?: { skipAnimation?: boolean; source?: "viz" | "list" | "search" | "minimap" },
+    ) => {
       setFormErr(null);
+      setChartOrigin2dOverride(null);
+      setChartOrigin3dOverride(null);
       const t = name.trim();
+      const skipAnimation = !!opts?.skipAnimation;
+      const src = opts?.source ?? "viz";
+      if (src === "list" && t) setSeedListHighlightName(t);
+
+      const syncHighlightForVizOrSearch = () => {
+        if (src !== "viz" && src !== "search") return;
+        const seedsSet = parseSeeds(appliedSeedsTextRef.current);
+        setSeedListHighlightName(t && seedsSet.has(t) ? t : "");
+      };
+
       if (webGpuError) {
+        syncHighlightForVizOrSearch();
         setAppliedFocus(t);
+        return;
+      }
+      if (bundle3d) {
+        if (!isFocusAnimatingRef.current && t === appliedFocusRef.current.trim()) return;
+        if (isFocusAnimatingRef.current && t === (focusAnimTargetRef.current ?? "").trim()) return;
+
+        let p0End: Vec3;
+        try {
+          p0End = p0FromProtein(bundle3d, t);
+        } catch {
+          return;
+        }
+
+        const seeds = parseSeeds(appliedSeedsText);
+        if (seeds.size === 0) {
+          syncHighlightForVizOrSearch();
+          setAppliedFocus(t);
+          return;
+        }
+
+        if (showAllGraphEdges) {
+          isFocusAnimatingRef.current = false;
+          p0AnimRef.current = null;
+          setFocusAnimTarget(null);
+          syncHighlightForVizOrSearch();
+          setAppliedFocus(t);
+          return;
+        }
+
+        if (skipAnimation) {
+          cancelAnimationFrame(focusAnimRafRef.current);
+          focusAnimGenRef.current += 1;
+          isFocusAnimatingRef.current = false;
+          p0AnimRef.current = null;
+          setFocusAnimTarget(null);
+          try {
+            const buf = computeScene3d(
+              bundle3d,
+              p0End.x,
+              p0End.y,
+              p0End.z,
+              seeds,
+              rimCullEps,
+              nonSeedShowMode,
+              seedEdgeDisplayMode,
+              showAllGraphEdges,
+            );
+            ballViewRef.current?.applySceneBuffers(buf);
+          } catch {
+            syncHighlightForVizOrSearch();
+            setAppliedFocus(t);
+            return;
+          }
+          syncHighlightForVizOrSearch();
+          setAppliedFocus(t);
+          return;
+        }
+
+        cancelAnimationFrame(focusAnimRafRef.current);
+        const gen = ++focusAnimGenRef.current;
+
+        let p0Start: Vec3;
+        try {
+          const fromName = appliedFocusRef.current.trim();
+          p0Start = p0AnimRef.current ?? p0FromProtein(bundle3d, fromName || t);
+        } catch {
+          syncHighlightForVizOrSearch();
+          setAppliedFocus(t);
+          return;
+        }
+
+        const p0Geo = new Float32Array(P0_GEODESIC_SAMPLES * 3);
+        fillP0BallGeodesic(
+          p0Start.x,
+          p0Start.y,
+          p0Start.z,
+          p0End.x,
+          p0End.y,
+          p0End.z,
+          P0_GEODESIC_SAMPLES,
+          p0Geo,
+        );
+
+        isFocusAnimatingRef.current = true;
+        syncHighlightForVizOrSearch();
+        setFocusAnimTarget(t);
+
+        const FOCUS_MS = 1000;
+        const t0 = performance.now();
+
+        const tick = (now: number) => {
+          if (gen !== focusAnimGenRef.current) return;
+          const tLin = Math.min(1, (now - t0) / FOCUS_MS);
+          const u = easeInOutCubic(tLin);
+          const p0 = p0AtBallGeodesicParameter(p0Geo, P0_GEODESIC_SAMPLES, u);
+          p0AnimRef.current = p0;
+          let buf: SceneBuffers3d | null = null;
+          try {
+            buf = computeScene3d(
+              bundle3d,
+              p0.x,
+              p0.y,
+              p0.z,
+              seeds,
+              rimCullEps,
+              nonSeedShowMode,
+              seedEdgeDisplayMode,
+              showAllGraphEdges,
+            );
+          } catch {
+            focusAnimGenRef.current += 1;
+            isFocusAnimatingRef.current = false;
+            p0AnimRef.current = null;
+            setFocusAnimTarget(null);
+            syncHighlightForVizOrSearch();
+            setAppliedFocus(t);
+            return;
+          }
+          ballViewRef.current?.applySceneBuffers(buf);
+          if (tLin < 1) {
+            focusAnimRafRef.current = requestAnimationFrame(tick);
+          } else {
+            isFocusAnimatingRef.current = false;
+            p0AnimRef.current = null;
+            setFocusAnimTarget(null);
+            setAppliedFocus(t);
+          }
+        };
+        focusAnimRafRef.current = requestAnimationFrame(tick);
         return;
       }
       if (!bundle) return;
@@ -432,6 +894,7 @@ export default function App() {
 
       const seeds = parseSeeds(appliedSeedsText);
       if (seeds.size === 0) {
+        syncHighlightForVizOrSearch();
         setAppliedFocus(t);
         return;
       }
@@ -441,6 +904,25 @@ export default function App() {
         z0AnimRef.current = null;
         setFocusAnimTarget(null);
         diskViewRef.current?.recenterPreservingZoom();
+        syncHighlightForVizOrSearch();
+        setAppliedFocus(t);
+        return;
+      }
+
+      if (skipAnimation) {
+        isFocusAnimatingRef.current = false;
+        z0AnimRef.current = null;
+        setFocusAnimTarget(null);
+        diskViewRef.current?.recenterPreservingZoom();
+        try {
+          const buf = computeScene(bundle, z0End, seeds, rimCullEps, nonSeedShowMode, seedEdgeDisplayMode, showAllGraphEdges);
+          diskViewRef.current?.applySceneBuffers(buf);
+        } catch {
+          syncHighlightForVizOrSearch();
+          setAppliedFocus(t);
+          return;
+        }
+        syncHighlightForVizOrSearch();
         setAppliedFocus(t);
         return;
       }
@@ -450,6 +932,7 @@ export default function App() {
         const fromName = appliedFocusRef.current.trim();
         z0Start = z0AnimRef.current ?? z0FromProtein(bundle, fromName || t);
       } catch {
+        syncHighlightForVizOrSearch();
         setAppliedFocus(t);
         return;
       }
@@ -462,6 +945,7 @@ export default function App() {
       diskViewRef.current?.recenterPreservingZoom();
 
       isFocusAnimatingRef.current = true;
+      syncHighlightForVizOrSearch();
       setFocusAnimTarget(t);
 
       const FOCUS_MS = 1000;
@@ -475,12 +959,13 @@ export default function App() {
         z0AnimRef.current = z0;
         let buf: SceneBuffers | null = null;
         try {
-          buf = computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode, showAllGraphEdges);
+          buf = computeScene(bundle, z0, seeds, rimCullEps, nonSeedShowMode, seedEdgeDisplayMode, showAllGraphEdges);
         } catch {
           focusAnimGenRef.current += 1;
           isFocusAnimatingRef.current = false;
           z0AnimRef.current = null;
           setFocusAnimTarget(null);
+          syncHighlightForVizOrSearch();
           setAppliedFocus(t);
           return;
         }
@@ -496,23 +981,34 @@ export default function App() {
       };
       focusAnimRafRef.current = requestAnimationFrame(tick);
     },
-    [bundle, appliedSeedsText, rimCullEps, nonSeedShowMode, showAllGraphEdges, webGpuError],
+    [bundle, bundle3d, appliedSeedsText, rimCullEps, nonSeedShowMode, seedEdgeDisplayMode, showAllGraphEdges, webGpuError],
   );
 
   useLayoutEffect(() => {
-    if (!bundle || !degrees) {
-      nodeInteractionRef.current = null;
+    if (bundle3d && degrees) {
+      nodeInteractionRef.current = {
+        tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForGraph3d(bundle3d, i, degrees, runMeta),
+        pickGraphIndex: (i: number) => {
+          if (i < 0 || i >= bundle3d.vertex.length) return;
+          onPickFocus(bundle3d.vertex[i]!);
+        },
+        shiftPickGraphIndex,
+      };
       return;
     }
-    nodeInteractionRef.current = {
-      tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForIndex(bundle, i, degrees, runMeta),
-      pickGraphIndex: (i: number) => {
-        if (i < 0 || i >= bundle.vertex.length) return;
-        onPickFocus(bundle.vertex[i]!);
-      },
-      shiftPickGraphIndex,
-    };
-  }, [bundle, degrees, onPickFocus, runMeta, shiftPickGraphIndex]);
+    if (bundle && degrees) {
+      nodeInteractionRef.current = {
+        tooltipForGraphIndex: (i: number) => nodeDiskHoverTooltipForIndex(bundle, i, degrees, runMeta),
+        pickGraphIndex: (i: number) => {
+          if (i < 0 || i >= bundle.vertex.length) return;
+          onPickFocus(bundle.vertex[i]!);
+        },
+        shiftPickGraphIndex,
+      };
+      return;
+    }
+    nodeInteractionRef.current = null;
+  }, [bundle, bundle3d, degrees, onPickFocus, runMeta, shiftPickGraphIndex]);
 
   const stats: SceneStats | null = scene?.stats ?? null;
   const focusUiKey = focusAnimTarget?.trim() || appliedFocus.trim();
@@ -521,202 +1017,413 @@ export default function App() {
     <div
       className="shell"
     >
-      <DiskView
-        ref={diskViewRef}
-        scene={scene}
-        pathOverlay={pathOverlay}
-        webGpuError={webGpuError}
-        showSeedLabels={showSeedLabels}
-        showCrosshair={showCrosshair}
-        centerWeightedSizes={centerWeightedSizes}
-        radialScaleMin={radialScaleMin}
-        radialScaleMax={radialScaleMax}
-        nodeSizeMul={nodeSizeMul}
-        compensateZoomNodes={compensateZoomNodes}
-        nodeMinMul={nodeMinMul}
-        nodeInteractionRef={nodeInteractionRef}
-      />
+      <div className="focusSearchBar" aria-label="Focus search">
+        <div className="focusSearchBarInner">
+          <div className="focusSearchRow">
 
-      <AnalysisFloater
-        open={analysisOpen}
-        onClose={() => setAnalysisOpen(false)}
-        bundle={bundle}
-        degrees={degrees}
-        seedNamesOrdered={analysisSeedOrder}
-        z0={z0Current}
-        csr={graphCSR}
-      />
+            <div className="focusSearchInputRow">
+              <input
+                id="focusSearchInput"
+                className="focusSearchInput"
+                type="text"
+                value={focusSearch}
+                onChange={(e) => setFocusSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    if (focusSearchMatches.length === 0) return;
+                    setFocusSearchHl((h) => Math.min(h + 1, focusSearchMatches.length - 1));
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setFocusSearchHl((h) => Math.max(h - 1, 0));
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    const exact = focusSearch.trim();
+                    if (focusSearchMatches.length > 0) {
+                      onPickFocus(focusSearchMatches[focusSearchHl]!, { source: "search" });
+                      setFocusSearch("");
+                    } else if (exact && pickerGraph?.nameToIndex.has(exact)) {
+                      onPickFocus(exact, { source: "search" });
+                      setFocusSearch("");
+                    }
+                  } else if (e.key === "Escape") {
+                    setFocusSearch("");
+                  }
+                }}
+                placeholder={pickerGraph ? "Type name… Enter to focus" : "No graph loaded"}
+                autoComplete="off"
+                spellCheck={false}
+                aria-autocomplete="list"
+                aria-controls="focusSearchList"
+                aria-expanded={focusSearch.trim().length > 0 && focusSearchMatches.length > 0}
+                disabled={!pickerGraph || !!webGpuError}
+              />
+              {pickerGraph && focusSearch.trim() && focusSearchMatches.length > 0 ? (
+                <ul id="focusSearchList" className="focusSearchList" role="listbox">
+                  {focusSearchMatches.map((name, i) => (
+                    <li key={name} role="presentation">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={i === focusSearchHl}
+                        className={i === focusSearchHl ? "focusSearchItem focusSearchItemOn" : "focusSearchItem"}
+                        onMouseEnter={() => setFocusSearchHl(i)}
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => {
+                          onPickFocus(name, { source: "search" });
+                          setFocusSearch("");
+                        }}
+                      >
+                        {name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
 
-      <PathTreesFloater
-        open={pathTreesOpen}
-        onClose={() => setPathTreesOpen(false)}
-        bundle={bundle}
-        scene={scene}
-        z0={z0Current}
-        csr={graphCSR}
-        pickerNames={pickerNames}
-        appliedFocus={appliedFocus}
-        appliedSeedsText={appliedSeedsText}
-        onPathOverlayChange={handlePathOverlayChange}
-      />
+      {bundle3d ? (
+        <BallView3d
+          ref={ballViewRef}
+          scene={scene as SceneBuffers3d | null}
+          pathOverlay={pathOverlay}
+          webGpuError={webGpuError}
+          showSeedLabels={showSeedLabels}
+          nodeInteractionRef={nodeInteractionRef as RefObject<BallView3dNodeInteraction | null>}
+          centerWeightedSizes={centerWeightedSizes}
+          radialScaleMin={radialScaleMin}
+          radialScaleMax={radialScaleMax}
+          nodeSizeMul={nodeSizeMul}
+          compensateZoomNodes={compensateZoomNodes}
+          nodeMinMul={nodeMinMul}
+          edgeOpacity={edgeOpacity}
+          hoverNeighborGraph={hoverNeighborGraph3d}
+        />
+      ) : (
+        <DiskView
+          ref={diskViewRef}
+          scene={scene as SceneBuffers | null}
+          pathOverlay={pathOverlay}
+          webGpuError={webGpuError}
+          showSeedLabels={showSeedLabels}
+          showCrosshair={showCrosshair}
+          centerWeightedSizes={centerWeightedSizes}
+          radialScaleMin={radialScaleMin}
+          radialScaleMax={radialScaleMax}
+          nodeSizeMul={nodeSizeMul}
+          compensateZoomNodes={compensateZoomNodes}
+          nodeMinMul={nodeMinMul}
+          edgeOpacity={edgeOpacity}
+          hoverNeighborGraph={hoverNeighborGraph2d}
+          nodeInteractionRef={nodeInteractionRef as RefObject<DiskViewNodeInteraction | null>}
+        />
+      )}
+
+      {bundle || bundle3d ? (
+        <AnalysisFloater
+          open={analysisOpen}
+          onClose={() => setAnalysisOpen(false)}
+          bundle={bundle ?? bundle3d}
+          chartMode={bundle3d ? "3d" : "2d"}
+          degrees={degrees}
+          seedNamesOrdered={analysisSeedOrder}
+          z0={z0Current}
+          p0Ball={p0Ball}
+          csr={graphCSR}
+        />
+      ) : null}
+
+      {bundle || bundle3d ? (
+        <PathTreesFloater
+          open={pathTreesOpen}
+          onClose={() => setPathTreesOpen(false)}
+          bundle={bundle ?? bundle3d}
+          chartMode={bundle3d ? "3d" : "2d"}
+          z0={z0Current}
+          p0Ball={p0Ball}
+          csr={graphCSR}
+          pickerNames={pickerNames}
+          appliedSeedsText={appliedSeedsText}
+          onPathOverlayChange={handlePathOverlayChange}
+        />
+      ) : null}
+
+      {pickerGraph && minimapVisible ? (
+        <GraphMinimap
+          mode={bundle3d ? "3d" : "2d"}
+          graph2d={bundle}
+          graph3d={bundle3d}
+          minimap2dMode={minimap2dMode}
+          minimap3dMode={minimap3dMode}
+          focusIndicatorName={focusUiKey}
+          seeds={minimapSeeds}
+          onChartPick2d={onMinimapChart2d}
+          onChartPick3d={onMinimapChart3d}
+          onPickFocus={onPickFocus}
+        />
+      ) : null}
 
       <details className="advancedPanel">
         <summary>Advanced</summary>
         <div className="advancedInner">
-          <label
-            className="seedLabelsCb"
-            title="When on, green/red node markers shrink partially with Euclidean zoom (50% of full inverse scale) so they grow less on screen. Off = world size unchanged when zooming."
-          >
-            <input
-              type="checkbox"
-              checked={compensateZoomNodes}
-              onChange={(e) => setCompensateZoomNodes(e.target.checked)}
-            />
-            <span>Shrink nodes when zooming (50%)</span>
-          </label>
-          <button
-            type="button"
-            className="resetViewBtn"
-            onClick={() => diskViewRef.current?.resetView()}
-            disabled={!!webGpuError}
-          >
-            Reset view
-          </button>
-          <label
-            className="advancedSlider"
-            title="Hide nodes with |W| past the rim band (seeds and seed-touching edges can still be shown)."
-          >
-            <span className="advancedSliderLabel">rimcull</span>
-            <input
-              type="range"
-              min={0}
-              max={RIM_CULL_EPS_SLIDER_MAX}
-              step={0.0005}
-              value={Math.min(rimCullEps, RIM_CULL_EPS_SLIDER_MAX)}
-              onChange={(e) => setRimCullEps(Number(e.target.value))}
-              aria-valuetext={`rimcull ${rimCullEps.toFixed(4)}`}
-            />
-            <span className="advancedSliderVal">{rimCullEps.toFixed(4)}</span>
-          </label>
-          <label className="seedLabelsCb">
-            <input
-              type="checkbox"
-              checked={showSeedLabels}
-              onChange={(e) => setShowSeedLabels(e.target.checked)}
-            />
-            <span>Show seed labels</span>
-          </label>
-          <label className="seedLabelsCb">
-            <input
-              type="checkbox"
-              checked={showCrosshair}
-              onChange={(e) => setShowCrosshair(e.target.checked)}
-            />
-            <span>Show crosshair</span>
-          </label>
-          <label
-            className="advancedSelect"
-            title="Green disks: all non-seeds in view, none, or only vertices on a seed-touching edge. Red seeds and geodesics unchanged."
-          >
-            <span className="advancedSelectLabel">Show nodes</span>
-            <select
-              value={nonSeedShowMode}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "all" || v === "seed_only" || v === "seed_and_neighbors") {
-                  setNonSeedShowMode(v);
-                }
-              }}
-              aria-label="Show nodes"
-            >
-              <option value="all">All</option>
-              <option value="seed_only">Only seed</option>
-              <option value="seed_and_neighbors">Only seed and neighbors</option>
-            </select>
-          </label>
-          <label className="seedLabelsCb" title="Larger near disk center (after focus map); same rule for green and red nodes.">
-            <input
-              type="checkbox"
-              checked={centerWeightedSizes}
-              onChange={(e) => setCenterWeightedSizes(e.target.checked)}
-            />
-            <span>Size nodes by distance to center</span>
-          </label>
-          <label className="advancedSlider" title="Scales green point sprites and both disk radii (world units).">
-            <span className="advancedSliderLabel">Node size</span>
-            <input
-              type="range"
-              min={0.25}
-              max={2.5}
-              step={0.025}
-              value={nodeSizeMul}
-              onChange={(e) => setNodeSizeMul(Number(e.target.value))}
-              aria-valuetext={`node size ${nodeSizeMul.toFixed(2)}×`}
-            />
-            <span className="advancedSliderVal">{nodeSizeMul.toFixed(2)}×</span>
-          </label>
-          <label
-            className="advancedSlider"
-            title="Raises the smallest nodes: floor on radial scale (when distance sizing is on) and on zoom-size multiplier for disks and green points."
-          >
-            <span className="advancedSliderLabel">Node minimum</span>
-            <input
-              type="range"
-              min={0.02}
-              max={0.55}
-              step={0.01}
-              value={nodeMinMul}
-              onChange={(e) => setNodeMinMul(Number(e.target.value))}
-              aria-valuetext={`node minimum ${nodeMinMul.toFixed(2)}`}
-            />
-            <span className="advancedSliderVal">{nodeMinMul.toFixed(2)}</span>
-          </label>
-          <label
-            className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
-            title="Scale factor at the rim (|W|≈1 in the plane); only used when distance sizing is on."
-          >
-            <span className="advancedSliderLabel">Rim scale</span>
-            <input
-              type="range"
-              min={0.05}
-              max={1.5}
-              step={0.01}
-              value={radialScaleMin}
-              disabled={!centerWeightedSizes}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setRadialScaleMin(v);
-                setRadialScaleMax((M) => Math.max(M, v));
-              }}
-              aria-valuetext={`rim scale ${radialScaleMin.toFixed(2)}`}
-            />
-            <span className="advancedSliderVal">{radialScaleMin.toFixed(2)}</span>
-          </label>
-          <label
-            className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
-            title="Scale factor at disk center; only used when distance sizing is on."
-          >
-            <span className="advancedSliderLabel">Center scale</span>
-            <input
-              type="range"
-              min={0.3}
-              max={2.5}
-              step={0.01}
-              value={radialScaleMax}
-              disabled={!centerWeightedSizes}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setRadialScaleMax(v);
-                setRadialScaleMin((m) => Math.min(m, v));
-              }}
-              aria-valuetext={`center scale ${radialScaleMax.toFixed(2)}`}
-            />
-            <span className="advancedSliderVal">{radialScaleMax.toFixed(2)}</span>
-          </label>
+          <details className="advancedSubsection" open>
+            <summary className="advancedSubsectionSummary">Show</summary>
+            <div className="advancedSubsectionBody">
+              <label
+                className="advancedSelectRow"
+                title="Green disks: all non-seeds in view, none, or only vertices on a seed-touching edge. Red seeds and seed–seed geodesics unchanged."
+              >
+                <span className="advancedSelectLabel">Show nodes</span>
+                <select
+                  value={nonSeedShowMode}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "all" || v === "seed_only" || v === "seed_and_neighbors") {
+                      setNonSeedShowMode(v);
+                    }
+                  }}
+                  aria-label="Show nodes"
+                >
+                  <option value="all">All nodes</option>
+                  <option value="seed_only">Only seeds</option>
+                  <option value="seed_and_neighbors">Seeds and neighbors</option>
+                </select>
+              </label>
+              <label
+                className="advancedSelectRow"
+                title="Seed connected: only geodesics between two seeds (red). Seed all: also one-seed edges (blue). Shift+U still toggles faint non-seed–non-seed edges."
+              >
+                <span className="advancedSelectLabel">Edges</span>
+                <select
+                  value={seedEdgeDisplayMode}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "seed_connected" || v === "seed_all") setSeedEdgeDisplayMode(v);
+                  }}
+                  aria-label="Which graph edges to draw"
+                >
+                  <option value="seed_connected">Seed connected</option>
+                  <option value="seed_all">Seed all</option>
+                </select>
+              </label>
+              <label className="seedLabelsCb">
+                <input
+                  type="checkbox"
+                  checked={showSeedLabels}
+                  onChange={(e) => setShowSeedLabels(e.target.checked)}
+                />
+                <span>Seed labels</span>
+              </label>
+              <label className="seedLabelsCb">
+                <input
+                  type="checkbox"
+                  checked={showCrosshair}
+                  onChange={(e) => setShowCrosshair(e.target.checked)}
+                />
+                <span>Crosshair</span>
+              </label>
+            </div>
+          </details>
+
+          <details className="advancedSubsection">
+            <summary className="advancedSubsectionSummary">Render options</summary>
+            <div className="advancedSubsectionBody">
+              <label className="advancedSlider" title="Scales green point sprites and both disk radii (world units).">
+                <span className="advancedSliderLabel">Node size</span>
+                <input
+                  type="range"
+                  min={0.25}
+                  max={2.5}
+                  step={0.025}
+                  value={nodeSizeMul}
+                  onChange={(e) => setNodeSizeMul(Number(e.target.value))}
+                  aria-valuetext={`node size ${nodeSizeMul.toFixed(2)}×`}
+                />
+                <span className="advancedSliderVal">{nodeSizeMul.toFixed(2)}×</span>
+              </label>
+              <label
+                className="advancedSlider"
+                title="Raises the smallest nodes: floor on radial scale (when distance sizing is on) and on zoom-size multiplier for disks and green points."
+              >
+                <span className="advancedSliderLabel">Node minimum size</span>
+                <input
+                  type="range"
+                  min={0.02}
+                  max={0.55}
+                  step={0.01}
+                  value={nodeMinMul}
+                  onChange={(e) => setNodeMinMul(Number(e.target.value))}
+                  aria-valuetext={`node minimum ${nodeMinMul.toFixed(2)}`}
+                />
+                <span className="advancedSliderVal">{nodeMinMul.toFixed(2)}</span>
+              </label>
+              <label
+                className="advancedSlider"
+                title="Opacity of blue one-seed edges (when Edges = Seed all) on the disk and in the 3D ball."
+              >
+                <span className="advancedSliderLabel">Edge opacity</span>
+                <input
+                  type="range"
+                  min={0.02}
+                  max={1}
+                  step={0.02}
+                  value={edgeOpacity}
+                  onChange={(e) => setEdgeOpacity(Number(e.target.value))}
+                  aria-valuetext={`edge opacity ${edgeOpacity.toFixed(2)}`}
+                />
+                <span className="advancedSliderVal">{edgeOpacity.toFixed(2)}</span>
+              </label>
+              <label
+                className="advancedSlider"
+                title="Hide nodes with |W| past the rim band (seeds and seed-touching edges can still be shown)."
+              >
+                <span className="advancedSliderLabel">Rim cull</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={RIM_CULL_EPS_SLIDER_MAX}
+                  step={0.0005}
+                  value={Math.min(rimCullEps, RIM_CULL_EPS_SLIDER_MAX)}
+                  onChange={(e) => setRimCullEps(Number(e.target.value))}
+                  aria-valuetext={`rim cull ${rimCullEps.toFixed(4)}`}
+                />
+                <span className="advancedSliderVal">{rimCullEps.toFixed(4)}</span>
+              </label>
+              <label className="seedLabelsCb" title="Larger near disk center (after focus map); same rule for green and red nodes.">
+                <input
+                  type="checkbox"
+                  checked={centerWeightedSizes}
+                  onChange={(e) => setCenterWeightedSizes(e.target.checked)}
+                />
+                <span>Size nodes by distance to center</span>
+              </label>
+              <label
+                className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
+                title="Scale factor at the rim (|W|≈1 in the plane); only used when distance sizing is on."
+              >
+                <span className="advancedSliderLabel">Rim scale</span>
+                <input
+                  type="range"
+                  min={0.05}
+                  max={1.5}
+                  step={0.01}
+                  value={radialScaleMin}
+                  disabled={!centerWeightedSizes}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setRadialScaleMin(v);
+                    setRadialScaleMax((M) => Math.max(M, v));
+                  }}
+                  aria-valuetext={`rim scale ${radialScaleMin.toFixed(2)}`}
+                />
+                <span className="advancedSliderVal">{radialScaleMin.toFixed(2)}</span>
+              </label>
+              <label
+                className={`advancedSlider${centerWeightedSizes ? "" : " advancedSliderDisabled"}`}
+                title="Scale factor at disk center; only used when distance sizing is on."
+              >
+                <span className="advancedSliderLabel">Center scale</span>
+                <input
+                  type="range"
+                  min={0.3}
+                  max={2.5}
+                  step={0.01}
+                  value={radialScaleMax}
+                  disabled={!centerWeightedSizes}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setRadialScaleMax(v);
+                    setRadialScaleMin((m) => Math.min(m, v));
+                  }}
+                  aria-valuetext={`center scale ${radialScaleMax.toFixed(2)}`}
+                />
+                <span className="advancedSliderVal">{radialScaleMax.toFixed(2)}</span>
+              </label>
+              <label
+                className="seedLabelsCb"
+                title="When on, green/red node markers shrink partially with Euclidean zoom (50% of full inverse scale) so they grow less on screen. Off = world size unchanged when zooming."
+              >
+                <input
+                  type="checkbox"
+                  checked={compensateZoomNodes}
+                  onChange={(e) => setCompensateZoomNodes(e.target.checked)}
+                />
+                <span>Shrink nodes when zooming (50%)</span>
+              </label>
+            </div>
+          </details>
+
+          {pickerGraph ? (
+            <details className="advancedSubsection">
+              <summary className="advancedSubsectionSummary">Minimap</summary>
+              <div className="advancedSubsectionBody">
+                <label className="seedLabelsCb" title="Overview map bottom-left (native disk / stereographic / globe, etc.).">
+                  <input
+                    type="checkbox"
+                    checked={minimapVisible}
+                    onChange={(e) => setMinimapVisible(e.target.checked)}
+                  />
+                  <span>Show minimap</span>
+                </label>
+                <label
+                  className="advancedSelectRow"
+                  title={
+                    bundle3d
+                      ? "Projection for the bottom-left 3D overview."
+                      : "Chart for the bottom-left 2D overview."
+                  }
+                >
+                  <span className="advancedSelectLabel">Minimap mode</span>
+                  <select
+                    value={bundle3d ? minimap3dMode : minimap2dMode}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (bundle3d) setMinimap3dMode(v as Minimap3dMode);
+                      else setMinimap2dMode(v as Minimap2dMode);
+                    }}
+                    aria-label="Minimap overview mode"
+                  >
+                    {bundle3d ? (
+                      <>
+                        <option value="stereo_north">North stereographic</option>
+                        <option value="stereo_south">South stereographic</option>
+                        <option value="ortho_xy">Orthographic (XY)</option>
+                        <option value="ortho_xz">Orthographic (XZ)</option>
+                        <option value="equirect">Equirectangular (lon/lat)</option>
+                        <option value="lambert_north">Lambert azimuthal (north)</option>
+                        <option value="gnomonic_north">Gnomonic (north, capped)</option>
+                        <option value="globe_webgl">Globe (WebGL)</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="native_disk">Native disk (re, im)</option>
+                        <option value="polar_euclidean">Polar (|z|, arg z)</option>
+                        <option value="hyperbolic_polar">Hyperbolic radius + angle</option>
+                        <option value="upper_half_plane">Upper half-plane (Cayley)</option>
+                        <option value="sqrt_branch">Principal √z</option>
+                      </>
+                    )}
+                  </select>
+                </label>
+              </div>
+            </details>
+          ) : null}
         </div>
       </details>
 
-      <div className="floatPanel">
+      <details
+        className="floatPanel"
+        open={seedPanelOpen}
+        onToggle={(e) => {
+          /* Mirror native `open` — do not preventDefault or invert; that fights the DOM and can loop open/closed. */
+          setSeedPanelOpen(e.currentTarget.open);
+        }}
+      >
+        <summary>Seeds &amp; focus</summary>
+        <div className="floatPanelBody">
         {loadErr ? <div className="errLine">{loadErr}</div> : null}
         <textarea
           className="seedsTa"
@@ -725,21 +1432,31 @@ export default function App() {
           spellCheck={false}
           aria-label="Seeds"
         />
-        <button type="button" className="applyMini" onClick={onApplySeeds} disabled={!bundle} title="Apply seeds">
+        <button
+          type="button"
+          className="applyMini"
+          onClick={onApplySeeds}
+          disabled={!pickerGraph}
+          title="Apply seeds"
+        >
           ↵
         </button>
         {formErr ? <div className="errLine">{formErr}</div> : null}
         <ul className="nameList" aria-label="Focus">
           {pickerNames.map((name) => {
-            const idx = bundle?.nameToIndex.get(name);
+            const idx = pickerGraph?.nameToIndex.get(name);
             const deg = idx !== undefined && degrees ? degrees[idx] : null;
-            const tip = bundle ? nodeListTooltip(bundle, name, deg, runMeta) : name;
+            const tip = pickerGraph
+              ? bundle3d
+                ? nodeListTooltip3d(bundle3d, name, deg, runMeta)
+                : nodeListTooltip(bundle!, name, deg, runMeta)
+              : name;
             return (
               <li key={name}>
                 <button
                   type="button"
-                  className={name === focusUiKey ? "nameBtn nameBtnOn" : "nameBtn"}
-                  onClick={() => onPickFocus(name)}
+                  className={name === seedListHighlightName.trim() ? "nameBtn nameBtnOn" : "nameBtn"}
+                  onClick={() => onPickFocus(name, { source: "list" })}
                   title={tip}
                 >
                   <span className="nameBtnLabel">{name}</span>
@@ -749,76 +1466,8 @@ export default function App() {
             );
           })}
         </ul>
-        {bundle ? (
-          <div className="focusSearchWrap">
-            <div className="focusSearchRow">
-              <label className="focusSearchLabel" htmlFor="focusSearchInput">
-                Search
-              </label>
-              <div className="focusSearchInputRow">
-                <input
-                  id="focusSearchInput"
-                  className="focusSearchInput"
-                  type="text"
-                  value={focusSearch}
-                  onChange={(e) => setFocusSearch(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      if (focusSearchMatches.length === 0) return;
-                      setFocusSearchHl((h) => Math.min(h + 1, focusSearchMatches.length - 1));
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setFocusSearchHl((h) => Math.max(h - 1, 0));
-                    } else if (e.key === "Enter") {
-                      e.preventDefault();
-                      const exact = focusSearch.trim();
-                      if (focusSearchMatches.length > 0) {
-                        onPickFocus(focusSearchMatches[focusSearchHl]!);
-                        setFocusSearch("");
-                      } else if (exact && bundle.nameToIndex.has(exact)) {
-                        onPickFocus(exact);
-                        setFocusSearch("");
-                      }
-                    } else if (e.key === "Escape") {
-                      setFocusSearch("");
-                    }
-                  }}
-                  placeholder="Type gene… Enter to focus"
-                  autoComplete="off"
-                  spellCheck={false}
-                  aria-autocomplete="list"
-                  aria-controls="focusSearchList"
-                  aria-expanded={focusSearch.trim().length > 0 && focusSearchMatches.length > 0}
-                  disabled={!!webGpuError}
-                />
-                {focusSearch.trim() && focusSearchMatches.length > 0 ? (
-                  <ul id="focusSearchList" className="focusSearchList" role="listbox">
-                    {focusSearchMatches.map((name, i) => (
-                      <li key={name} role="presentation">
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={i === focusSearchHl}
-                          className={i === focusSearchHl ? "focusSearchItem focusSearchItemOn" : "focusSearchItem"}
-                          onMouseEnter={() => setFocusSearchHl(i)}
-                          onMouseDown={(ev) => ev.preventDefault()}
-                          onClick={() => {
-                            onPickFocus(name);
-                            setFocusSearch("");
-                          }}
-                        >
-                          {name}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        ) : null}
-      </div>
+        </div>
+      </details>
 
       <div className="statusBox" aria-live="polite">
         {stats ? (
@@ -879,6 +1528,96 @@ export default function App() {
           <div className="statusRow muted">—</div>
         )}
       </div>
+
+      {shortcutsHelpOpen ? (
+        <div
+          className="shortcutsHelpBackdrop"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setShortcutsHelpOpen(false);
+          }}
+        >
+          <div
+            className="shortcutsHelpDialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shortcuts-help-title"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="shortcutsHelpHeader">
+              <h2 id="shortcuts-help-title" className="shortcutsHelpTitle">
+                Shortcuts &amp; tips
+              </h2>
+              <button
+                type="button"
+                className="shortcutsHelpClose"
+                onClick={() => setShortcutsHelpOpen(false)}
+                aria-label="Close help"
+              >
+                ×
+              </button>
+            </div>
+            <div className="shortcutsHelpBody">
+              <p>By default we render all network nodes (green dots), at top left you can enter a set of nodes that get highlighted red, also their edges get drawn</p>
+              <p>To focus on a node click on it in the list or search for it in the top bar.</p>
+              <p>For more control use advanced configuration at the top right. </p>
+              <h3 className="shortcutsHelpSectionTitle">General</h3>
+              <ul className="shortcutsHelpList">
+                <li>
+                  <kbd>I</kbd> — Show or hide this panel
+                </li>
+                <li>
+                  <kbd>Shift</kbd>+<kbd>M</kbd> — Toggle 2D disk vs 3D ball dataset (URL <code>#3d</code>)
+                </li>
+                <li>
+                  <kbd>R</kbd> — Reset camera (disk pan/zoom/Möbius or ball orbit)
+                </li>
+                <li>
+                  <kbd>M</kbd> — Flash Prim MST overlay on the current layout
+                </li>
+              </ul>
+
+              <h3 className="shortcutsHelpSectionTitle">Nodes &amp; pointer (disk or ball)</h3>
+              <ul className="shortcutsHelpList">
+                <li>
+                  <strong>Click</strong> a node — Set <strong>focus</strong> to that node (recenters the chart)
+                </li>
+                <li>
+                  <kbd>Shift</kbd>+<strong>click</strong> a node — Add/remove that node in the{" "}
+                  <strong>seeds draft</strong> (left “Seeds &amp; focus” list)
+                </li>
+                <li>
+                  <kbd>Alt</kbd> (or <kbd>⌥</kbd> / <kbd>AltGr</kbd>) + <strong>hover</strong> a node — Highlight
+                  incident graph edges in <strong>white</strong>
+                </li>
+              </ul>
+
+              <h3 className="shortcutsHelpSectionTitle">Disk (2D)</h3>
+              <ul className="shortcutsHelpList">
+                <li>
+                  Drag — Pan the chart
+                </li>
+                <li>
+                  <kbd>Shift</kbd>+drag — Adjust the <strong>viewer Möbius</strong> map
+                </li>
+                <li>
+                  <kbd>Shift</kbd>+wheel — Rim / boundary gamma (rim emphasis)
+                </li>
+              </ul>
+
+              <h3 className="shortcutsHelpSectionTitle">Ball (3D)</h3>
+              <ul className="shortcutsHelpList">
+
+                <li>
+                  <kbd>Shift</kbd>+wheel — Rim gamma (same idea as 2D)
+                </li>
+              </ul>
+
+            </div>
+
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

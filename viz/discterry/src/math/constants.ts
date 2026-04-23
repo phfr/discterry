@@ -17,10 +17,15 @@ export const GEODESIC_N = 96;
 export const BACKGROUND_NONSEED_EDGE_MAX = 25_000;
 
 /** Skip drawing edges if an endpoint has |z| >= this in the original disk (notebook uses 0.999). */
-export const EDGE_Z_BOUND = 0.999;
+export const EDGE_Z_BOUND = 0.9999 ;
 
 /** Default rim margin: hide nodes with |W| > 1 - RIM_CULL_EPS after Möbius (display-only). */
 export const RIM_CULL_EPS = 0;
 
 /** Upper bound for the rim-cull slider in the UI (larger = more aggressive hiding). */
 export const RIM_CULL_EPS_SLIDER_MAX = 0.04;
+
+/** Shift+wheel “rim power” viewer map w ↦ |w|^(γ−1) w (|w|=1 fixed); disk and 3D ball share these bounds. */
+export const VIEWER_RIM_GAMMA_MIN = 0.38;
+export const VIEWER_RIM_GAMMA_MAX = 2.4;
+export const VIEWER_RIM_WHEEL_SENS = 0.0014;

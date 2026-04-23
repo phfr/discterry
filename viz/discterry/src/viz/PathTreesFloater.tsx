@@ -1,31 +1,22 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { GraphBundle } from "../data/loadBundle";
+import type { GraphBundle3d } from "../data/loadBundle3d";
 import type { Complex } from "../math/mobius";
-import {
-  PRIM_MAX_SEEDS,
-  bfsParentTree,
-  bfsShortestPath,
-  collectFilteredBfsTreeEdges,
-  type GraphCSR,
-} from "../model/graphSearch";
-import { tryBuildPrimMstOverlay } from "../model/primMstOverlay";
+import { PRIM_MAX_SEEDS, bfsShortestPath, type GraphCSR } from "../model/graphSearch";
+import { tryBuildPrimMstOverlay, tryBuildPrimMstOverlay3d } from "../model/primMstOverlay";
 import type { PathOverlayBuffer } from "../model/pathOverlayBuffer";
-import { buildPathOverlayFromEdges, buildPathOverlayFromVertexPath } from "../model/pathOverlayBuffer";
-import type { SceneBuffers } from "../model/computeScene";
-
+import { buildPathOverlayFromVertexPath, buildPathOverlayFromVertexPath3d } from "../model/pathOverlayBuffer";
 type TabId = "graph" | "geometry";
-
-const BFS_TREE_MAX_DRAW_EDGES = 8000;
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  bundle: GraphBundle | null;
-  scene: SceneBuffers | null;
+  bundle: GraphBundle | GraphBundle3d | null;
+  chartMode: "2d" | "3d";
   z0: Complex | null;
+  p0Ball: { x: number; y: number; z: number } | null;
   csr: GraphCSR | null;
   pickerNames: string[];
-  appliedFocus: string;
   appliedSeedsText: string;
   onPathOverlayChange: (overlay: PathOverlayBuffer | null) => void;
 };
@@ -34,11 +25,11 @@ export function PathTreesFloater({
   open,
   onClose,
   bundle,
-  scene,
+  chartMode,
   z0,
+  p0Ball,
   csr,
   pickerNames,
-  appliedFocus,
   appliedSeedsText,
   onPathOverlayChange,
 }: Props) {
@@ -60,14 +51,6 @@ export function PathTreesFloater({
         ? pickerNames[1]!
         : (pickerNames[0] ?? "");
 
-  const renderedVertexSet = useMemo(() => {
-    if (!scene) return null;
-    const s = new Set<number>();
-    for (let i = 0; i < scene.seedGraphIndex.length; i++) s.add(scene.seedGraphIndex[i]!);
-    for (let i = 0; i < scene.otherGraphIndex.length; i++) s.add(scene.otherGraphIndex[i]!);
-    return s;
-  }, [scene]);
-
   const clearOverlay = () => {
     onPathOverlayChange(null);
     setMsg(null);
@@ -75,12 +58,45 @@ export function PathTreesFloater({
 
   const showShortestPath = () => {
     setMsg(null);
-    if (!bundle || !z0 || !csr) {
+    if (!bundle || !csr) {
       setMsg("Graph not ready.");
       return;
     }
-    const ia = bundle.nameToIndex.get(fromSel.trim());
-    const ib = bundle.nameToIndex.get(toSel.trim());
+    if (chartMode === "3d") {
+      if (!p0Ball) {
+        setMsg("Ball focus not ready.");
+        return;
+      }
+      const b = bundle as GraphBundle3d;
+      const ia = b.nameToIndex.get(fromSel.trim());
+      const ib = b.nameToIndex.get(toSel.trim());
+      if (ia === undefined || ib === undefined) {
+        setMsg("Pick valid names from the list.");
+        return;
+      }
+      const path = bfsShortestPath(csr, ia, ib);
+      if (!path) {
+        setMsg("No path (disconnected in this graph).");
+        onPathOverlayChange(null);
+        return;
+      }
+      const buf = buildPathOverlayFromVertexPath3d(b, p0Ball.x, p0Ball.y, p0Ball.z, path);
+      if (!buf) {
+        setMsg("Path lies past draw clip (boundary).");
+        onPathOverlayChange(null);
+        return;
+      }
+      onPathOverlayChange(buf);
+      setMsg(`Shortest path: ${path.length} vertices.`);
+      return;
+    }
+    if (!z0) {
+      setMsg("Graph not ready.");
+      return;
+    }
+    const b2 = bundle as GraphBundle;
+    const ia = b2.nameToIndex.get(fromSel.trim());
+    const ib = b2.nameToIndex.get(toSel.trim());
     if (ia === undefined || ib === undefined) {
       setMsg("Pick valid names from the list.");
       return;
@@ -91,7 +107,7 @@ export function PathTreesFloater({
       onPathOverlayChange(null);
       return;
     }
-    const buf = buildPathOverlayFromVertexPath(bundle, z0, path);
+    const buf = buildPathOverlayFromVertexPath(b2, z0, path);
     if (!buf) {
       setMsg("Path lies past draw clip (boundary).");
       onPathOverlayChange(null);
@@ -101,41 +117,44 @@ export function PathTreesFloater({
     setMsg(`Shortest path: ${path.length} vertices.`);
   };
 
-  const showBfsTree = () => {
-    setMsg(null);
-    if (!bundle || !z0 || !csr) {
-      setMsg("Graph not ready.");
-      return;
-    }
-    const root = bundle.nameToIndex.get(appliedFocus.trim());
-    if (root === undefined) {
-      setMsg("Focus protein not in graph.");
-      return;
-    }
-    const parent = bfsParentTree(csr, root);
-    const edges = collectFilteredBfsTreeEdges(parent, root, renderedVertexSet, BFS_TREE_MAX_DRAW_EDGES);
-    if (edges.length === 0) {
-      setMsg("No tree edges to draw (try widening seeds / show nodes).");
-      onPathOverlayChange(null);
-      return;
-    }
-    const buf = buildPathOverlayFromEdges(bundle, z0, edges);
-    if (!buf) {
-      setMsg("Tree edges skipped by boundary clip.");
-      onPathOverlayChange(null);
-      return;
-    }
-    onPathOverlayChange(buf);
-    setMsg(`BFS tree from focus: ${edges.length} edges (capped / filtered to current view).`);
-  };
-
   const showPrimMst = () => {
     setMsg(null);
-    if (!bundle || !z0) {
+    if (!bundle) {
       setMsg("Embedding not ready.");
       return;
     }
-    const r = tryBuildPrimMstOverlay(bundle, z0, appliedSeedsText);
+    if (chartMode === "3d") {
+      if (!p0Ball) {
+        setMsg("Ball focus not ready.");
+        return;
+      }
+      const r = tryBuildPrimMstOverlay3d(
+        bundle as GraphBundle3d,
+        p0Ball.x,
+        p0Ball.y,
+        p0Ball.z,
+        appliedSeedsText,
+      );
+      if (!r.ok) {
+        if (r.reason === "need_two_seeds") {
+          setMsg("Need ≥2 applied seeds for Prim MST.");
+        } else if (r.reason === "too_many_seeds") {
+          setMsg(`Too many seeds (>${PRIM_MAX_SEEDS}); reduce seed list for Prim.`);
+        } else {
+          setMsg("MST edges skipped by boundary clip.");
+        }
+        onPathOverlayChange(null);
+        return;
+      }
+      onPathOverlayChange(r.buf);
+      setMsg(`Prim MST on ${r.seedCount} seeds (hyperbolic distance in 𝔹³ W at current focus).`);
+      return;
+    }
+    if (!z0) {
+      setMsg("Embedding not ready.");
+      return;
+    }
+    const r = tryBuildPrimMstOverlay(bundle as GraphBundle, z0, appliedSeedsText);
     if (!r.ok) {
       if (r.reason === "need_two_seeds") {
         setMsg("Need ≥2 applied seeds for Prim MST.");
@@ -263,24 +282,22 @@ export function PathTreesFloater({
               <button type="button" className="pathTreesBtn" onClick={showShortestPath}>
                 Show shortest path
               </button>
-              <button type="button" className="pathTreesBtn" onClick={showBfsTree}>
-                BFS tree from focus
-              </button>
               <button type="button" className="pathTreesBtn pathTreesBtnGhost" onClick={clearOverlay}>
                 Clear overlay
               </button>
             </div>
             <p className="pathTreesHint">
-              BFS tree edges are limited to children that appear in the <strong>current disk view</strong> (green +
-              red markers), up to {BFS_TREE_MAX_DRAW_EDGES} edges.
+              Shortest path is the BFS shortest route in the abstract graph, drawn as hyperbolic geodesics in the
+              current {chartMode === "3d" ? "ball" : "disk"} view.
             </p>
           </div>
         ) : null}
         {tab === "geometry" ? (
           <div className="pathTreesControls">
             <p className="pathTreesHint">
-              <strong>Prim MST</strong> on <strong>applied seeds</strong> only, using hyperbolic distance in the
-              W-plane at the current focus. Capped at 48 seeds.
+              <strong>Prim MST</strong> on <strong>applied seeds</strong> only, using hyperbolic distance in{" "}
+              {chartMode === "3d" ? "the Poincaré ball W" : "the W-plane"} at the current focus. Capped at 48
+              seeds.
             </p>
             <div className="pathTreesBtnRow">
               <button type="button" className="pathTreesBtn" onClick={showPrimMst}>

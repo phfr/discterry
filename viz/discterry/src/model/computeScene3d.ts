@@ -1,15 +1,9 @@
 import { BACKGROUND_NONSEED_EDGE_MAX, GEODESIC_N } from "../math/constants";
-import type { Complex } from "../math/mobius";
-import { mobiusDiskArrays } from "../math/mobius";
-import type { GraphBundle } from "../data/loadBundle";
-import { appendGeodesicLineSegments } from "./geodesicLineBuffer";
+import { mobiusBallArrays } from "../math/poincareBall";
+import type { GraphBundle3d } from "../data/loadBundle3d";
+import { appendGeodesicLineSegments3d } from "./geodesicLineBuffer3d";
 import { buildSeedMask, classifySeedEdges } from "./graphFilter";
-
-/** Which non-seed vertices get green disk markers (edges are always seed-touching only). */
-export type NonSeedShowMode = "all" | "seed_only" | "seed_and_neighbors";
-
-/** Seed–seed (red) vs all seed-touching (red + blue one-seed) geodesics. */
-export type SeedEdgeDisplayMode = "seed_connected" | "seed_all";
+import type { NonSeedShowMode, SceneStats, SeedEdgeDisplayMode } from "./computeScene";
 
 function includeGreenNonSeed(mode: NonSeedShowMode, seedEdgeVertex: Uint8Array, i: number): boolean {
   if (mode === "all") return true;
@@ -17,42 +11,14 @@ function includeGreenNonSeed(mode: NonSeedShowMode, seedEdgeVertex: Uint8Array, 
   return seedEdgeVertex[i] === 1;
 }
 
-export type SceneStats = {
-  nodesTotal: number;
-  nodesRendered: number;
-  /** Nodes not drawn: |W| past rim band, not a seed, not endpoint of a seed-touching edge. */
-  nodesHiddenRim: number;
-  /** Seeds that lie in the rim band but are still drawn. */
-  nodesSparedSeedRim: number;
-  /** Non-seeds on at least one seed-touching edge, in rim band, still drawn. */
-  nodesSparedSeedEdgeRim: number;
-  edgesSeedTouching: number;
-  edgesDrawn: number;
-  /**
-   * Seed-touching edges not drawn because an endpoint has |Z| or |W| ≥ EDGE_Z_BOUND
-   * (notebook clip — not the same as rim culling).
-   */
-  edgesSkippedBoundary: number;
-  /** Non-seed–non-seed edges actually drawn (when overlay enabled); 0 otherwise. */
-  edgesBackgroundDrawn: number;
-  /** When overlay on: count of non-seed–non-seed edges in the graph (before sampling). */
-  edgesBackgroundPool: number;
-  /** Geodesics built for this frame (after sampling cap, before per-edge clip). */
-  edgesBackgroundSubmitted: number;
-};
-
-export type SceneBuffers = {
+export type SceneBuffers3d = {
   lineOnePositions: Float32Array;
   lineBothPositions: Float32Array;
-  /** Geodesics for edges with neither endpoint a seed (optional overlay). */
   lineBgPositions: Float32Array;
   pointsOther: Float32Array;
   pointsSeed: Float32Array;
-  /** Graph vertex index for each `pointsOther` instance (green), same order as triples. */
   otherGraphIndex: Int32Array;
-  /** Graph vertex index for each `pointsSeed` instance (red). */
   seedGraphIndex: Int32Array;
-  /** Same length as `nPointsSeed`, order matches `pointsSeed` triples. */
   seedLabels: string[];
   nLineOneVerts: number;
   nLineBothVerts: number;
@@ -62,17 +28,19 @@ export type SceneBuffers = {
   stats: SceneStats;
 };
 
-export function computeScene(
-  bundle: GraphBundle,
-  z0: Complex,
+export function computeScene3d(
+  bundle: GraphBundle3d,
+  p0x: number,
+  p0y: number,
+  p0z: number,
   seedNames: Set<string>,
   rimCullEps: number,
   nonSeedShowMode: NonSeedShowMode,
   seedEdgeDisplayMode: SeedEdgeDisplayMode,
   drawAllNonSeedEdges: boolean,
-): SceneBuffers {
-  const { x: zx, y: zy, src, dst, nameToIndex } = bundle;
-  const n = zx.length;
+): SceneBuffers3d {
+  const { x: px, y: py, z: pz, src, dst, nameToIndex } = bundle;
+  const n = px.length;
 
   const isSeed = buildSeedMask(n, seedNames, nameToIndex);
   const { both, one } = classifySeedEdges(src, dst, isSeed);
@@ -89,7 +57,8 @@ export function computeScene(
 
   const wx = new Float32Array(n);
   const wy = new Float32Array(n);
-  mobiusDiskArrays(zx, zy, z0, wx, wy, n);
+  const wz = new Float32Array(n);
+  mobiusBallArrays(px, py, pz, p0x, p0y, p0z, wx, wy, wz, n);
 
   const rim = 1 - Math.max(0, rimCullEps);
 
@@ -103,7 +72,8 @@ export function computeScene(
   let sparedEdge = 0;
 
   for (let i = 0; i < n; i++) {
-    const rimWouldCull = Math.hypot(wx[i], wy[i]) > rim;
+    const rw = Math.hypot(wx[i], wy[i], wz[i]);
+    const rimWouldCull = rw > rim;
     const show = !rimWouldCull || isSeed[i] === 1 || seedEdgeVertex[i] === 1;
 
     if (rimWouldCull) {
@@ -116,12 +86,11 @@ export function computeScene(
     if (!show) continue;
 
     if (isSeed[i]) {
-      /* Slight +Z so seeds sit in front of coplanar green sprites at the same (x,y). */
-      seedPts.push(wx[i], wy[i], 0.004);
+      seedPts.push(wx[i], wy[i], wz[i]);
       seedIdx.push(i);
       seedLabels.push(bundle.vertex[i]);
     } else if (includeGreenNonSeed(nonSeedShowMode, seedEdgeVertex, i)) {
-      otherPts.push(wx[i], wy[i], 0);
+      otherPts.push(wx[i], wy[i], wz[i]);
       otherIdx.push(i);
     }
   }
@@ -138,13 +107,13 @@ export function computeScene(
   let drawnOne = 0;
   for (const ei of both) {
     const before = ob.i;
-    appendGeodesicLineSegments(zx, zy, z0, src[ei], dst[ei], lineBothPositions, ob);
+    appendGeodesicLineSegments3d(px, py, pz, p0x, p0y, p0z, src[ei], dst[ei], lineBothPositions, ob);
     if (ob.i > before) drawnBoth++;
   }
   if (drawOneSeedEdges) {
     for (const ei of one) {
       const before = oo.i;
-      appendGeodesicLineSegments(zx, zy, z0, src[ei], dst[ei], lineOnePositions, oo);
+      appendGeodesicLineSegments3d(px, py, pz, p0x, p0y, p0z, src[ei], dst[ei], lineOnePositions, oo);
       if (oo.i > before) drawnOne++;
     }
   }
@@ -178,7 +147,7 @@ export function computeScene(
   let drawnBg = 0;
   for (const ei of none) {
     const before = ogb.i;
-    appendGeodesicLineSegments(zx, zy, z0, src[ei]!, dst[ei]!, lineBgPositions, ogb);
+    appendGeodesicLineSegments3d(px, py, pz, p0x, p0y, p0z, src[ei]!, dst[ei]!, lineBgPositions, ogb);
     if (ogb.i > before) drawnBg++;
   }
 

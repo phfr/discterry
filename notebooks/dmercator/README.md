@@ -20,7 +20,7 @@ In the first code cell of any notebook, set `RUN_SUBDIR = "d3"` (or your folder 
 2. `01_exploratory_qa.ipynb` — distributions and correlations  
 3. `02_disk_views.ipynb` — disk projections and sampled PPI edges (matplotlib)  
 4. `03_link_prediction_sanity.ipynb` — crude edge vs non-edge checks  
-5. `04_export_disk_web_bundle.ipynb` — export `nodes.parquet` / `edges.parquet` / `meta.json` for the **`viz/discterry/`** WebGPU app (**Discterry**)  
+5. `04_export_disk_web_bundle.ipynb` — export `nodes.parquet` / `edges.parquet` / `meta.json` for **`viz/discterry/public/data/`** (2D disk) and, via `export_discterry_public_data_3d`, **`viz/discterry/public/data3d/`** for **`#3d`** ball mode  
 6. `viz_*.ipynb` — one notebook per rendering stack for comparable exports  
 
 ## Python environment
