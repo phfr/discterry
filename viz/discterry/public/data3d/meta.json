@@ -1,0 +1,31 @@
+{
+  "run_subdir": "d3",
+  "discterry_mode": "3d",
+  "n_vertices": 17090,
+  "n_edges": 298866,
+  "default_focus": "JUP",
+  "default_seeds": [
+    "ABCC9",
+    "CDH2",
+    "DSG2",
+    "DSP",
+    "GJA5",
+    "JUP",
+    "KCND3",
+    "KCNJ2",
+    "PKP2",
+    "PSEN1",
+    "PSEN2",
+    "SCN1B",
+    "TGFB3",
+    "TPM1"
+  ],
+  "dimension": 3,
+  "mercator_nb_vertices_header": 17090,
+  "beta": 3.01,
+  "mu": 2.27519e-05,
+  "radius_s_d": 9.53098,
+  "radius_h_d1": 13.4843,
+  "kappa_min": 0.707314,
+  "inf_coord_path": "C:\\Users\\john\\Documents\\philipp\\hbol\\d-mercator-run\\d3\\edges_GC.inf_coord"
+}

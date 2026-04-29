@@ -100,8 +100,6 @@ type AnalysisBundle = GraphBundle | GraphBundle3d;
 
 function drawDegreeMetricScatter(
   canvas: HTMLCanvasElement,
-  cssW: number,
-  cssH: number,
   bundle: AnalysisBundle,
   degrees: Int32Array,
   stride: number,
