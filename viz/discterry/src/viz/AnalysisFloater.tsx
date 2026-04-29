@@ -105,8 +105,9 @@ function drawDegreeMetricScatter(
   stride: number,
   yMetric: DegYMetric,
 ) {
-  const w = canvas.width;
-  const h = canvas.height;
+  /* Match redraw(): bitmap is DPR-scaled but ctx.setTransform(dpr) — coordinates must be CSS pixels. */
+  const w = cssW;
+  const h = cssH;
   const ctx = canvas.getContext("2d");
   if (!ctx || w < 10 || h < 10) return;
   ctx.fillStyle = "#121218";
@@ -613,7 +614,7 @@ export function AnalysisFloater({
     if (!bundle) return;
     if (tab === "deg") {
       if (!degrees) return;
-      drawDegreeMetricScatter(el, bundle, degrees, stride, degYMetric);
+      drawDegreeMetricScatter(el, cwCss, chCss, bundle, degrees, stride, degYMetric);
     } else if (tab === "angular") {
       drawSeedCosineHeatmap(el, cwCss, chCss, bundle, seedNamesOrdered);
     } else if (tab === "seedPairs") {
